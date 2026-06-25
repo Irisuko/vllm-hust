@@ -87,7 +87,7 @@ class LlamaModel(nn.Module):
         self.fc = ReplicatedLinear(
             input_size=self.config.hidden_size * 2,
             output_size=self.config.hidden_size,
-            bias=False,
+            bias=True,
             params_dtype=vllm_config.model_config.dtype,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "fc"),
@@ -173,6 +173,7 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
+        self.config.target_layer_count = target_layer_num
         self.model = LlamaModel(
             vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
         )

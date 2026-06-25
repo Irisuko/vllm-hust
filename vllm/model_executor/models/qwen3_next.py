@@ -279,6 +279,15 @@ class Qwen3NextAttention(nn.Module):
         output: torch.Tensor,
         hidden_states: torch.Tensor,
     ):
+        print("==== QWEN3_NEXT_FORWARD_DEBUG ====", flush=True)
+        for _name, _value in list(locals().items()):
+            if _name == "self":
+                continue
+            try:
+                _shape = tuple(_value.shape) if hasattr(_value, "shape") else None
+            except Exception:
+                _shape = "shape_error"
+            print(f"{_name}: type={type(_value)}, is_none={_value is None}, shape={_shape}", flush=True)
         qkv, _ = self.qkv_proj(hidden_states)
 
         if self.attn_output_gate:
@@ -746,9 +755,19 @@ class Qwen3NextForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
-        )
+        if inputs_embeds is None:
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+            )
+        else:
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+            )
 
         return hidden_states
 
