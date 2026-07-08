@@ -79,7 +79,7 @@ def run_vllm(
         sampling_params.append(
             SamplingParams(
                 n=n,
-                temperature=1.0,
+                temperature=0.0,
                 top_p=1.0,
                 ignore_eos=True,
                 max_tokens=request.expected_output_len,
@@ -159,7 +159,7 @@ def run_vllm_chat(
         sampling_params.append(
             SamplingParams(
                 n=n,
-                temperature=1.0,
+                temperature=0.0,
                 top_p=1.0,
                 ignore_eos=True,
                 max_tokens=request.expected_output_len,
@@ -219,7 +219,7 @@ async def run_vllm_async(
             sampling_params.append(
                 SamplingParams(
                     n=n,
-                    temperature=1.0,
+                    temperature=0.0,
                     top_p=1.0,
                     ignore_eos=True,
                     max_tokens=request.expected_output_len,
@@ -301,7 +301,7 @@ def run_hf(
             input_ids=input_ids.to(current_platform.device_type),
             do_sample=True,
             num_return_sequences=n,
-            temperature=1.0,
+            temperature=0.0,
             top_p=1.0,
             use_cache=True,
             max_new_tokens=max_output_len,
