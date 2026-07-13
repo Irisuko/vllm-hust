@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import multiprocessing
+import threading
 from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -10,11 +11,14 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.utils.cache import CacheInfo
 from vllm.utils.import_utils import LazyLoader
+from vllm.v1.metrics.stats import StructuredOutputCacheStats
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
+    StructuredOutputOptions,
 )
 
 if TYPE_CHECKING:
@@ -29,6 +33,8 @@ else:
 
 
 logger = init_logger(__name__)
+
+_COMPILED_GRAMMAR_CACHE_LOG_INTERVAL = 128
 
 
 class StructuredOutputManager:
@@ -94,6 +100,11 @@ class StructuredOutputManager:
         self.enable_in_reasoning = (
             self.vllm_config.structured_outputs_config.enable_in_reasoning
         )
+        self._compiled_grammar_cache_log_interval = _COMPILED_GRAMMAR_CACHE_LOG_INTERVAL
+        self._next_compiled_grammar_cache_log_total = (
+            self._compiled_grammar_cache_log_interval
+        )
+        self._compiled_grammar_cache_log_lock = threading.Lock()
 
     def _get_reasoner(self, request: "Request") -> "ReasoningParser | None":
         structured_req = request.structured_output_request
@@ -183,7 +194,44 @@ class StructuredOutputManager:
         request_type, grammar_spec = key
 
         assert self.backend is not None
-        return self.backend.compile_grammar(request_type, grammar_spec)
+        grammar = self.backend.compile_grammar(request_type, grammar_spec)
+        self._maybe_log_compiled_grammar_cache_stats()
+        return grammar
+
+    def compiled_grammar_cache_stats(self, *, delta: bool = False) -> CacheInfo | None:
+        if self.backend is None or not hasattr(
+            self.backend, "compiled_grammar_cache_stats"
+        ):
+            return None
+        return self.backend.compiled_grammar_cache_stats(delta=delta)
+
+    def _maybe_log_compiled_grammar_cache_stats(self) -> None:
+        if self._compiled_grammar_cache_log_interval <= 0:
+            return
+
+        with self._compiled_grammar_cache_log_lock:
+            stats = self.compiled_grammar_cache_stats()
+            if (
+                stats is None
+                or stats.total < self._next_compiled_grammar_cache_log_total
+            ):
+                return
+
+            backend_name = (
+                type(self.backend).__name__ if self.backend is not None else "None"
+            )
+            logger.info(
+                "Structured output compiled grammar cache stats: "
+                "backend=%s hits=%d total=%d hit_ratio=%.4f",
+                backend_name,
+                stats.hits,
+                stats.total,
+                stats.hit_ratio,
+            )
+            while stats.total >= self._next_compiled_grammar_cache_log_total:
+                self._next_compiled_grammar_cache_log_total += (
+                    self._compiled_grammar_cache_log_interval
+                )
 
     def _fill_bitmasks(
         self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]
@@ -213,11 +261,8 @@ class StructuredOutputManager:
         if not structured_output_request_ids:
             return None
 
-        max_num_spec_tokens = 0
-        if self.vllm_config.speculative_config is not None:
-            max_num_spec_tokens = (
-                self.vllm_config.speculative_config.num_speculative_tokens
-            )
+        # Covers both speculative decoding and diffusion LLMs (canvas_length).
+        max_num_spec_tokens = self.vllm_config.num_speculative_tokens
 
         if self._grammar_bitmask is None:
             assert self.backend is not None
@@ -279,7 +324,13 @@ class StructuredOutputManager:
 
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                for token in itertools.chain(req_tokens, (-1,)):
+                if self.vllm_config.model_config.is_diffusion and req_tokens:
+                    # Diffusion LLMs don't sample a bonus token after the
+                    # scheduled positions, so don't append the -1 placeholder.
+                    token_iter: Iterable[int] = req_tokens
+                else:
+                    token_iter = itertools.chain(req_tokens, (-1,))
+                for token in token_iter:
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
                         # Stop advancing the grammar once we hit a padding token.
@@ -353,12 +404,61 @@ class StructuredOutputManager:
         if reasoner.is_reasoning_end_streaming(
             all_token_ids, itertools.islice(all_token_ids, start, None)
         ):
-            # Reasoning just ended, so we shouldn't advance til
-            # next pass
             structured_req.reasoning_ended = True
+
+            # Reasoning just ended this step. Defer FSM advance until the next
+            # pass (see reasoning_ended check above) for JSON/regex/choice/grammar:
+            # advancing on the closing boundary token can accept tokens that still
+            # belong to the reasoning stream. Structural tags are the only safe
+            # same-step exception: they model phased output (e.g. thinking tag ->
+            # answer tag), and speculative decoding must run grammar.validate_tokens
+            # on draft tokens produced immediately after that transition.
+            if (
+                self.vllm_config.speculative_config is not None
+                and structured_req.structured_output_key[0]
+                == StructuredOutputOptions.STRUCTURAL_TAG
+            ):
+                return True
 
         return False
 
     def clear_backend(self) -> None:
         if self.backend is not None:
+            stats = self.compiled_grammar_cache_stats()
+            if stats is not None and stats.total > 0:
+                logger.debug(
+                    "Structured output backend cache stats before destroy: "
+                    "backend=%s hits=%d total=%d hit_ratio=%.4f",
+                    type(self.backend).__name__,
+                    stats.hits,
+                    stats.total,
+                    stats.hit_ratio,
+                )
             self.backend.destroy()
+            self._next_compiled_grammar_cache_log_total = (
+                self._compiled_grammar_cache_log_interval
+            )
+
+    def clear_compiled_grammar_cache(self) -> bool:
+        if self.backend is None:
+            return False
+
+        clear_fn = getattr(self.backend, "clear_compiled_grammar_cache", None)
+        if callable(clear_fn):
+            clear_fn()
+            with self._compiled_grammar_cache_log_lock:
+                self._next_compiled_grammar_cache_log_total = (
+                    self._compiled_grammar_cache_log_interval
+                )
+            return True
+        return False
+
+    def make_cache_stats(self) -> StructuredOutputCacheStats | None:
+        stats = self.compiled_grammar_cache_stats(delta=True)
+        if stats is None:
+            return None
+
+        cache_stats = StructuredOutputCacheStats()
+        if stats.total > 0:
+            cache_stats.record(num_queries=stats.total, num_hits=stats.hits)
+        return cache_stats

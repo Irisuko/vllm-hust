@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Mapping
+from bisect import bisect_left
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from itertools import chain
 
 from vllm.inputs import MultiModalHashes
 
@@ -29,8 +31,45 @@ class ProcessorInputs:
 
         mm_hashes = dict[str, list[str]]()
         hasher = MultiModalHasher
+        shared_items = [("model_id", model_id), *hf_processor_mm_kwargs.items()]
+        shared_items.sort(key=lambda kv: kv[0])
+        shared_keys = [key for key, _ in shared_items]
+        shared_key_set = set(shared_keys)
+
+        def make_shared_hash_item(modality: str) -> Callable[[object], str]:
+            def hash_item(item_to_hash: object) -> str:
+                # Preserve dict unpack overwrite semantics in the unlikely
+                # case of a key collision with processor kwargs.
+                return hasher.hash_kwargs(
+                    model_id=model_id,
+                    **{modality: item_to_hash},
+                    **hf_processor_mm_kwargs,
+                )
+
+            return hash_item
+
+        def make_ordered_hash_item(
+            prefix: list[tuple[str, object]],
+            modality: str,
+            suffix: list[tuple[str, object]],
+        ) -> Callable[[object], str]:
+            def hash_item(item_to_hash: object) -> str:
+                return hasher.hash_ordered_items(
+                    chain(prefix, ((modality, item_to_hash),), suffix)
+                )
+
+            return hash_item
 
         for modality, data_items in mm_data_items.items():
+            if modality in shared_key_set:
+                hash_item = make_shared_hash_item(modality)
+
+            else:
+                insert_idx = bisect_left(shared_keys, modality)
+                prefix = shared_items[:insert_idx]
+                suffix = shared_items[insert_idx:]
+                hash_item = make_ordered_hash_item(prefix, modality, suffix)
+
             if modality in mm_uuid_items:
                 uuid_items = mm_uuid_items[modality]
 
@@ -47,25 +86,12 @@ class ProcessorInputs:
                         # NOTE: use provided hash string to hash with kwargs
                         # if available for better performance.
                         item = uuid_item if uuid_item is not None else item
-                        hashes.append(
-                            hasher.hash_kwargs(
-                                model_id=model_id,
-                                **{modality: item},
-                                **hf_processor_mm_kwargs,
-                            )
-                        )
+                        hashes.append(hash_item(item))
                     else:
                         hashes.append(uuid_item)
 
                 mm_hashes[modality] = hashes
             else:
-                mm_hashes[modality] = [
-                    hasher.hash_kwargs(
-                        model_id=model_id,
-                        **{modality: item},
-                        **hf_processor_mm_kwargs,
-                    )
-                    for item in data_items
-                ]
+                mm_hashes[modality] = [hash_item(item) for item in data_items]
 
         return mm_hashes
