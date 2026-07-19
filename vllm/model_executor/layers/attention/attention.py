@@ -678,11 +678,6 @@ direct_register_custom_op(
 )
 
 
-
-# Filled by vllm_ascend draft_model proposer.
-# Keys look like: draft_model.model.layers.0.self_attn.attn
-_DRAFT_MODEL_ATTENTION_LAYERS = {}
-
 def get_attention_context(
     layer_name: str,
 ) -> tuple[Any, "Attention | MLAAttention", torch.Tensor, torch.Tensor]:
@@ -709,30 +704,14 @@ def get_attention_context(
     attn_metadata_raw = forward_context.attn_metadata
     attn_metadata: AttentionMetadata
     if isinstance(attn_metadata_raw, dict):
-        try:
-            attn_metadata = attn_metadata_raw[layer_name]
-        except KeyError:
-            if isinstance(layer_name, str) and layer_name.startswith("draft_model."):
-                attn_metadata = attn_metadata_raw[layer_name[len("draft_model."):]]
-            else:
-                raise
+        attn_metadata = attn_metadata_raw[layer_name]
     elif isinstance(attn_metadata_raw, list):
         # list[dict[str, AttentionMetadata]]: used in speculative decoding
         # where [0] is the base-model (non-speculative) metadata dict.
         attn_metadata = attn_metadata_raw[0][layer_name]
     else:
         attn_metadata = attn_metadata_raw
-    try:
-        attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
-    except KeyError:
-        if isinstance(layer_name, str) and layer_name.startswith("draft_model."):
-            draft_layers = globals().get("_DRAFT_MODEL_ATTENTION_LAYERS", {})
-            if layer_name in draft_layers:
-                attn_layer = draft_layers[layer_name]
-            else:
-                raise
-        else:
-            raise
+    attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache
     slot_mapping = forward_context.slot_mapping
     assert isinstance(slot_mapping, dict), (

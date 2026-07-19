@@ -180,7 +180,9 @@ class Qwen2ForCausalLMEagle(Qwen2ForCausalLM):
         )
         self.config.target_layer_count = target_layer_num
         self.model = Qwen2Model(
-            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+            start_layer_id=target_layer_num,
         )
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)

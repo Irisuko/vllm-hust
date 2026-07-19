@@ -95,7 +95,7 @@ class LlamaModel(nn.Module):
         self.fc = ReplicatedLinear(
             input_size=self.config.hidden_size * 2,
             output_size=self.config.hidden_size,
-            bias=True,
+            bias=False,
             params_dtype=vllm_config.model_config.dtype,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "fc"),

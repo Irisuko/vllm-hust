@@ -490,9 +490,8 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
                     LLM. `None` if no videos are passed.
         """
 
-        # patched: keep inputs_embeds for Qwen3Next text-only Ascend path
-        # if intermediate_tensors is not None:
-        #     inputs_embeds = None
+        if intermediate_tensors is not None:
+            inputs_embeds = None
 
         hidden_states = self.language_model.model(
             input_ids=input_ids,

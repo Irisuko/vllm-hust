@@ -178,7 +178,7 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.custom_class_proposer import create_custom_proposer
 from vllm.v1.spec_decode.dflash import DFlashProposer
-from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
+from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
@@ -583,7 +583,7 @@ class GPUModelRunner(
 
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.uses_draft_model():
-                self.drafter = AscendDraftModelProposer(
+                self.drafter = DraftModelProposer(
                     vllm_config=self.vllm_config,
                     device=self.device,
                     runner=self,
@@ -1497,7 +1497,6 @@ class GPUModelRunner(
                     if prev_req_index is None:
                         continue
                     num_accepted = valid_sampled_token_count[prev_req_index] - 1
-
                     correction = optimistic_num_accepted - num_accepted
                     req_state.num_computed_tokens -= correction
                     cur_req_index = self.input_batch.req_id_to_index.get(req_id)
@@ -3826,37 +3825,13 @@ class GPUModelRunner(
         Returns:
             Model output tensor
         """
-        torch.npu.synchronize()
-        _verify_t0 = time.perf_counter()
-
-        _verify_out = self.model(
+        return self.model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
             **model_kwargs,
         )
-
-        torch.npu.synchronize()
-        _verify_t1 = time.perf_counter()
-
-        if not hasattr(self, "_target_verify_forward_count"):
-            self._target_verify_forward_count = 0
-
-        self._target_verify_forward_count += 1
-
-        _n = input_ids.shape[0] if input_ids is not None else (
-            inputs_embeds.shape[0] if inputs_embeds is not None else -1
-        )
-        print(
-            f"[TARGET_FORWARD] "
-            f"{(_verify_t1 - _verify_t0) * 1000:.3f} ms "
-            f"tokens={_n} "
-            f"spec={self.speculative_config is not None}",
-            flush=True,
-        )
-
-        return _verify_out
 
     @staticmethod
     def _is_uniform_decode(
@@ -4403,10 +4378,6 @@ class GPUModelRunner(
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
         ):
-            if self.speculative_config is not None and __import__("os").getenv("SPEC_RATIO_PROFILE", "0") == "1":
-                torch.npu.synchronize()
-                _spec_target_t0 = time.perf_counter()
-
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -4414,22 +4385,6 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
-
-            if self.speculative_config is not None and __import__("os").getenv("SPEC_RATIO_PROFILE", "0") == "1":
-                torch.npu.synchronize()
-                _spec_target_t1 = time.perf_counter()
-                if not hasattr(self, "_spec_target_ms_sum"):
-                    self._spec_target_ms_sum = 0.0
-                    self._spec_target_cnt = 0
-                self._spec_target_cnt += 1
-                self._spec_target_ms_sum += (_spec_target_t1 - _spec_target_t0) * 1000
-                if self._spec_target_cnt % 20 == 0:
-                    print(
-                        f"[SPEC_TARGET_VERIFY] last={(_spec_target_t1-_spec_target_t0)*1000:.3f}ms "
-                        f"avg={self._spec_target_ms_sum/self._spec_target_cnt:.3f}ms "
-                        f"cnt={self._spec_target_cnt} tokens={num_tokens_padded}",
-                        flush=True,
-                    )
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4569,15 +4524,6 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
-
-        import os
-        if os.getenv("DRAFT_VERIFY_DEBUG", "0") == "1":
-            try:
-                x = sampler_output.sampled_token_ids
-                print("[DRAFT_VERIFY_DEBUG] sampled_token_ids shape:", getattr(x, "shape", None))
-                print("[DRAFT_VERIFY_DEBUG] sampled_token_ids:", x.detach().cpu().tolist()[:8] if hasattr(x, "detach") else x[:8])
-            except Exception as e:
-                print("[DRAFT_VERIFY_DEBUG] failed:", repr(e))
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
@@ -5237,10 +5183,6 @@ class GPUModelRunner(
             else:
                 mm_embed_inputs = None
 
-            if __import__("os").getenv("SPEC_RATIO_PROFILE", "0") == "1":
-                torch.npu.synchronize()
-                _spec_draft_t0 = time.perf_counter()
-
             draft_token_ids = self.drafter.propose(
                 num_speculative_tokens=num_spec_tokens_to_schedule,
                 target_token_ids=target_token_ids,
@@ -5259,22 +5201,6 @@ class GPUModelRunner(
                 if draft_probs is not None:
                     self._draft_probs = draft_probs
                     self._draft_prob_req_ids = self.input_batch.req_ids.copy()
-
-            if __import__("os").getenv("SPEC_RATIO_PROFILE", "0") == "1":
-                torch.npu.synchronize()
-                _spec_draft_t1 = time.perf_counter()
-                if not hasattr(self, "_spec_draft_ms_sum"):
-                    self._spec_draft_ms_sum = 0.0
-                    self._spec_draft_cnt = 0
-                self._spec_draft_cnt += 1
-                self._spec_draft_ms_sum += (_spec_draft_t1 - _spec_draft_t0) * 1000
-                if self._spec_draft_cnt % 20 == 0:
-                    print(
-                        f"[SPEC_DRAFT_PROPOSE] last={(_spec_draft_t1-_spec_draft_t0)*1000:.3f}ms "
-                        f"avg={self._spec_draft_ms_sum/self._spec_draft_cnt:.3f}ms "
-                        f"cnt={self._spec_draft_cnt}",
-                        flush=True,
-                    )
 
         return draft_token_ids
 
@@ -6096,12 +6022,6 @@ class GPUModelRunner(
                     slot_mapping=slot_mappings,
                 ),
             ):
-                torch.npu.synchronize()
-                _verify_t0 = time.time()
-
-                torch.npu.synchronize()
-                _target_t0 = time.time()
-
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -7467,10 +7387,7 @@ class GPUModelRunner(
         self.kv_cache_config = kv_cache_config
         self._mamba_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
-        print("[DRAFT_DEBUG] shared_kv_cache_layers before add:", getattr(self, "shared_kv_cache_layers", None))
-        print("[DRAFT_DEBUG] kv groups before add:", [(i, len(g.layer_names), g.layer_names[:3], g.layer_names[-3:]) for i,g in enumerate(kv_cache_config.kv_cache_groups)])
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
-        print("[DRAFT_DEBUG] kv groups after add:", [(i, len(g.layer_names), g.layer_names[:3], g.layer_names[-3:]) for i,g in enumerate(kv_cache_config.kv_cache_groups)])
         self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
