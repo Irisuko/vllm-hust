@@ -2,7 +2,7 @@ name: Ascend Benchmark Leaderboard
 
 on:
   pull_request:
-    types: [labeled]
+    types: [labeled, synchronize, reopened]
   issue_comment:
     types: [created]
   schedule:
@@ -247,7 +247,10 @@ jobs:
         (
           github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository &&
-          (github.event.label.name == 'ready' || github.event.label.name == 'verified')
+          (
+            contains(github.event.pull_request.labels.*.name, 'ready') ||
+            contains(github.event.pull_request.labels.*.name, 'verified')
+          )
         ) ||
         (github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.should_run == '1')
       )
@@ -260,11 +263,13 @@ jobs:
       - ascend
       - 910b
       - docker
+      - ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && 'npu-2' || (github.event_name == 'workflow_dispatch' && (vars.VLLM_HUST_MANUAL_RUNNER_LABEL || 'npu-1') || 'ascend-benchmark') }}
     timeout-minutes: 60
     env:
       HOME: ${{ github.workspace }}/.ci-home
       DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER: /usr/local/bin/run_ascend_benchmark_root_helper.sh
       HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_DISABLE_XET: "1"
       HF_ENDPOINT: ${{ vars.HF_ENDPOINT || 'https://hf-mirror.com' }}
       HF_HOME: ${{ github.workspace }}/../.hf-cache
       HUGGINGFACE_HUB_CACHE: ${{ github.workspace }}/../.hf-cache/hub
@@ -308,17 +313,20 @@ jobs:
       WEBSITE_LEADERBOARD_URL: ${{ vars.VLLM_HUST_LEADERBOARD_URL || '' }}
       PUBLISH_TO_BENCHMARK_REPO: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'schedule' && vars.VLLM_HUST_SCHEDULE_PUBLISH_BENCHMARK != '0') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_benchmark_repo)) && '1' || '0' }}
       PUBLISH_TO_HF: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf && secrets.HF_TOKEN != '') && '1' || '0' }}
-      TARGET_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && format('https://github.com/{0}.git', github.repository) || format('git@github.com:{0}.git', github.repository) }}
-      TARGET_REPO_SHA: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.pr_head_sha || github.sha }}
-      BENCHMARK_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && 'https://github.com/vLLM-HUST/vllm-hust-benchmark.git' || 'git@github.com:vLLM-HUST/vllm-hust-benchmark.git' }}
+      TARGET_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch') && format('https://github.com/{0}.git', github.repository) || format('git@github.com:{0}.git', github.repository) }}
+      # Fetch a stable named ref before checking out the head SHA. GitHub does
+      # not guarantee upload-pack access for an otherwise unreachable SHA.
+      TARGET_REPO_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
+      TARGET_REPO_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.pr_head_sha || github.sha }}
+      BENCHMARK_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch') && 'https://github.com/vLLM-HUST/vllm-hust-benchmark.git' || 'git@github.com:vLLM-HUST/vllm-hust-benchmark.git' }}
       BENCHMARK_REPO_SLUG: vLLM-HUST/vllm-hust-benchmark
       BENCHMARK_REPO_GH_TOKEN: ${{ (github.event_name != 'pull_request' && github.event_name != 'issue_comment') && secrets.VLLM_HUST_BENCHMARK_GH_TOKEN || '' }}
       BENCHMARK_REPO_SSH_KEY: ${{ (github.event_name != 'pull_request' && github.event_name != 'issue_comment') && secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY || '' }}
       BENCHMARK_REPO_REF: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch') && (vars.VLLM_HUST_BENCHMARK_REPO_REF || 'main') || 'main' }}
-      WEBSITE_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && 'https://github.com/vLLM-HUST/vllm-hust-website.git' || 'git@github.com:vLLM-HUST/vllm-hust-website.git' }}
-      VLLM_ASCEND_HUST_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && 'https://github.com/vLLM-HUST/vllm-ascend-hust.git' || 'git@github.com:vLLM-HUST/vllm-ascend-hust.git' }}
+      WEBSITE_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch') && 'https://github.com/vLLM-HUST/vllm-hust-website.git' || 'git@github.com:vLLM-HUST/vllm-hust-website.git' }}
+      VLLM_ASCEND_HUST_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch') && 'https://github.com/vLLM-HUST/vllm-ascend-hust.git' || 'git@github.com:vLLM-HUST/vllm-ascend-hust.git' }}
       ISSUE_COMMENT_PR_NUMBER: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.pr_number || '' }}
-      HUST_ASCEND_MANAGER_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && 'https://github.com/vLLM-HUST/ascend-runtime-manager.git' || 'git@github.com:vLLM-HUST/ascend-runtime-manager.git' }}
+      HUST_ASCEND_MANAGER_REPO_URL: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch') && 'https://github.com/vLLM-HUST/ascend-runtime-manager.git' || 'git@github.com:vLLM-HUST/ascend-runtime-manager.git' }}
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
       # Disable precompiled CUDA wheel fetch from wheels.vllm.ai.
       # The Ascend benchmark uses the vllm-ascend-hust plugin, not CUDA
@@ -362,6 +370,22 @@ jobs:
             echo "ASCEND_BENCHMARK_USE_SUDO=0" >> "$GITHUB_ENV"
           fi
 
+          # A dedicated runner container may expose one physical node such as
+          # /dev/davinci2. CANN renumbers that isolated device to logical 0
+          # inside the container, so preserving the physical suffix would hide
+          # the only available NPU from torch_npu.
+          mapfile -t runner_devnodes < <(
+            find /dev -maxdepth 1 -name 'davinci[0-9]*' -printf '%f\n' 2>/dev/null \
+              | sort -t i -k2 -n
+          )
+          if [[ "${RUNNER_NAME:-}" =~ npu([0-9]+)$ ]] \
+            && [[ "${#runner_devnodes[@]}" -eq 1 ]] \
+            && [[ "${runner_devnodes[0]}" == "davinci${BASH_REMATCH[1]}" ]]; then
+            echo "Dedicated ${RUNNER_NAME} container exposes ${runner_devnodes[0]}; using logical NPU 0."
+            echo "ASCEND_VISIBLE_DEVICES=0" >> "$GITHUB_ENV"
+            echo "ASCEND_RT_VISIBLE_DEVICES=0" >> "$GITHUB_ENV"
+          fi
+
           # Auto-detect NPU devices when no visibility env is set.
           # This is needed for root runners (where the root helper is
           # skipped) and any other case where the caller did not pre-set
@@ -378,8 +402,8 @@ jobs:
                 | sort -t i -k2 -n | paste -sd ',' || true)"
             fi
             if [[ -n "$detected_devices" ]]; then
-              echo "Auto-detected NPU devices: $detected_devices"
-              echo "ASCEND_VISIBLE_DEVICES=$detected_devices" >> "$GITHUB_ENV"
+              echo "Auto-detected candidate NPU devices: $detected_devices"
+              echo "ASCEND_CI_DETECTED_DEVICES=$detected_devices" >> "$GITHUB_ENV"
             else
               echo "[WARN] No NPU devices detected." >&2
             fi
@@ -488,8 +512,10 @@ jobs:
             local repo_url=$1
             local target_dir=$2
             local target_sha=$3
-            local attempts=${GIT_CHECKOUT_RETRY_ATTEMPTS:-6}
+            local target_ref=$4
+            local attempts=${GIT_CHECKOUT_RETRY_ATTEMPTS:-3}
             local delay_seconds=${GIT_CHECKOUT_RETRY_DELAY_SECONDS:-30}
+            local timeout_seconds=${GIT_CHECKOUT_TIMEOUT_SECONDS:-90}
             local try=1
             local parent_dir
             local temp_dir
@@ -500,18 +526,14 @@ jobs:
             mkdir -p "$parent_dir"
             rm -rf "$temp_dir"
             while [[ "$try" -le "$attempts" ]]; do
-              if git \
-                -c http.version=HTTP/1.1 \
-                -c http.lowSpeedLimit=1024 \
-                -c http.lowSpeedTime=30 \
-                clone --depth 1 "$repo_url" "$temp_dir"; then
-                if ! git -C "$temp_dir" rev-parse --verify --quiet "$target_sha^{commit}" >/dev/null; then
-                  git -C "$temp_dir" \
-                    -c http.version=HTTP/1.1 \
-                    -c http.lowSpeedLimit=1024 \
-                    -c http.lowSpeedTime=30 \
-                    fetch --depth 1 origin "$target_sha"
-                fi
+              mkdir -p "$temp_dir"
+              if git -C "$temp_dir" -c init.defaultBranch=main init \
+                && git -C "$temp_dir" remote add origin "$repo_url" \
+                && timeout --foreground "${timeout_seconds}s" git -C "$temp_dir" \
+                  -c http.version=HTTP/1.1 \
+                  -c http.lowSpeedLimit=1024 \
+                  -c http.lowSpeedTime=30 \
+                  fetch --no-tags --depth 1 origin "$target_ref"; then
                 git -C "$temp_dir" checkout --force "$target_sha"
                 rm -rf "$target_dir"
                 mv "$temp_dir" "$target_dir"
@@ -527,10 +549,35 @@ jobs:
             done
 
             echo "Failed to clone $repo_url after ${attempts} attempts" >&2
+
+            # The self-hosted runner's Git smart-HTTP mirror can lag behind
+            # GitHub's pull-request refs. The benchmark still needs the exact
+            # event source tree, so fall back to GitHub's SHA-addressed archive.
+            # Keep an origin remote: later steps may fetch main for Stage 2.
+            local repo_slug=${repo_url#https://github.com/}
+            repo_slug=${repo_slug%.git}
+            rm -rf "$temp_dir"
+            mkdir -p "$temp_dir"
+            if curl --fail --location --retry 3 --retry-all-errors \
+              "https://codeload.github.com/${repo_slug}/tar.gz/${target_sha}" \
+              | tar -xz --strip-components=1 -C "$temp_dir"; then
+              test -f "$temp_dir/pyproject.toml"
+              git -C "$temp_dir" init -q
+              git -C "$temp_dir" remote add origin "$repo_url"
+              git -C "$temp_dir" add -A
+              git -C "$temp_dir" -c user.name=ci -c user.email=ci@localhost \
+                commit -qm "CI source snapshot ${target_sha}"
+              rm -rf "$target_dir"
+              mv "$temp_dir" "$target_dir"
+              echo "Checked out SHA-addressed codeload snapshot: $target_sha"
+              return 0
+            fi
+
+            echo "Codeload fallback failed for $target_sha" >&2
             return 1
           }
 
-          clone_with_retry "$TARGET_REPO_URL" "$GITHUB_WORKSPACE" "$TARGET_REPO_SHA"
+          clone_with_retry "$TARGET_REPO_URL" "$GITHUB_WORKSPACE" "$TARGET_REPO_SHA" "$TARGET_REPO_REF"
 
       - name: L3 benchmark publication preflight
         shell: bash
@@ -568,7 +615,17 @@ jobs:
           }
 
           fetch_with_retry --deepen=500 origin main || fetch_with_retry --unshallow origin main || true
-          fetch_with_retry --no-tags origin "$PR_HEAD_SHA" "$PR_BASE_SHA"
+          if ! fetch_with_retry --no-tags origin "$PR_HEAD_SHA" "$PR_BASE_SHA"; then
+            # The source archive fallback above intentionally has no upstream
+            # ancestry. Use the exact PR base SHA for Stage 1 instead of
+            # pretending that the synthetic snapshot has a Git fork point.
+            # Stage 2 will either fetch main successfully or record a rebase
+            # conflict, both of which preserve a fail-closed performance gate.
+            echo "PR refs unavailable from the runner mirror; using PR base SHA as the conservative fork point." >&2
+            echo "FORK_POINT=$PR_BASE_SHA" >> "$GITHUB_ENV"
+            echo "Fork point fallback: $PR_BASE_SHA"
+            exit 0
+          fi
           git checkout --force "$PR_HEAD_SHA"
           fork_point="$(git merge-base "$PR_HEAD_SHA" "$PR_BASE_SHA")"
           echo "FORK_POINT=$fork_point" >> "$GITHUB_ENV"
@@ -582,6 +639,7 @@ jobs:
             local target_ref=${3:-}
             local attempts=6
             local delay_seconds=20
+            local timeout_seconds=${GIT_CHECKOUT_TIMEOUT_SECONDS:-90}
             local try=1
             local parent_dir
             local temp_dir
@@ -594,11 +652,13 @@ jobs:
             rm -rf "$target_dir" "$temp_dir"
             while [[ "$try" -le "$attempts" ]]; do
               echo "Clone attempt ${try}/${attempts}: $repo_url"
-              if git clone --depth 1 "$repo_url" "$temp_dir"; then
+              if timeout --foreground "${timeout_seconds}s" \
+                git clone --depth 1 "$repo_url" "$temp_dir"; then
                 if [[ -n "$target_ref" ]]; then
                   checkout_ref="$target_ref"
                   if ! git -C "$temp_dir" rev-parse --verify --quiet "$target_ref^{commit}" >/dev/null; then
-                    git -C "$temp_dir" fetch --depth 1 origin "$target_ref"
+                    timeout --foreground "${timeout_seconds}s" \
+                      git -C "$temp_dir" fetch --depth 1 origin "$target_ref"
                     checkout_ref=FETCH_HEAD
                   fi
                   git -C "$temp_dir" checkout --force "$checkout_ref"
@@ -658,11 +718,13 @@ jobs:
             local target_dir=$2
             local attempts=4
             local delay_seconds=15
+            local timeout_seconds=${GIT_CHECKOUT_TIMEOUT_SECONDS:-90}
             local try=1
 
             rm -rf "$target_dir"
             while [[ "$try" -le "$attempts" ]]; do
-              if git clone --depth 1 "$repo_url" "$target_dir"; then
+              if timeout --foreground "${timeout_seconds}s" \
+                git clone --depth 1 "$repo_url" "$target_dir"; then
                 return 0
               fi
               echo "Clone failed ($try/$attempts): $repo_url" >&2
@@ -673,6 +735,24 @@ jobs:
             done
 
             echo "Failed to clone $repo_url after ${attempts} attempts" >&2
+
+            # The PR benchmark still uses the website's aggregation script to
+            # build local leaderboard data, but it does not need website Git
+            # history.  Use codeload when this runner cannot reach GitHub's
+            # smart-HTTP endpoint.
+            local repo_slug=${repo_url#https://github.com/}
+            repo_slug=${repo_slug%.git}
+            rm -rf "$target_dir"
+            mkdir -p "$target_dir"
+            if curl --fail --location --retry 3 --retry-all-errors \
+              "https://codeload.github.com/${repo_slug}/tar.gz/main" \
+              | tar -xz --strip-components=1 -C "$target_dir"; then
+              test -f "$target_dir/scripts/aggregate_results.py"
+              echo "Checked out website source through codeload fallback."
+              return 0
+            fi
+
+            echo "Website codeload fallback failed for ${repo_slug}" >&2
             return 1
           }
 
@@ -685,11 +765,13 @@ jobs:
             local target_dir=$2
             local attempts=4
             local delay_seconds=15
+            local timeout_seconds=${GIT_CHECKOUT_TIMEOUT_SECONDS:-90}
             local try=1
 
             rm -rf "$target_dir"
             while [[ "$try" -le "$attempts" ]]; do
-              if git clone --depth 1 "$repo_url" "$target_dir"; then
+              if timeout --foreground "${timeout_seconds}s" \
+                git clone --depth 1 "$repo_url" "$target_dir"; then
                 return 0
               fi
               echo "Clone failed ($try/$attempts): $repo_url" >&2
@@ -782,11 +864,13 @@ jobs:
             local target_dir=$2
             local attempts=4
             local delay_seconds=15
+            local timeout_seconds=${GIT_CHECKOUT_TIMEOUT_SECONDS:-90}
             local try=1
 
             rm -rf "$target_dir"
             while [[ "$try" -le "$attempts" ]]; do
-              if git clone --depth 1 "$repo_url" "$target_dir"; then
+              if timeout --foreground "${timeout_seconds}s" \
+                git clone --depth 1 "$repo_url" "$target_dir"; then
                 return 0
               fi
               echo "Clone failed ($try/$attempts): $repo_url" >&2
