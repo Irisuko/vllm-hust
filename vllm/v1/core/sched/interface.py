@@ -34,6 +34,8 @@ class PauseState(enum.IntEnum):
 
 
 class SchedulerInterface(ABC):
+    available_kv_cache_memory_bytes: int | None
+
     @abstractmethod
     def __init__(
         self,

@@ -379,6 +379,48 @@ class KVCacheCoordinator(ABC):
             group_hashes=self.block_pool.get_cached_block_hashes_by_group(),
         )
 
+    def truncate_request_tail_blocks(
+        self,
+        request_id: str,
+        num_blocks_to_keep: int,
+        expected_block_ids: tuple[tuple[int, ...], ...],
+    ) -> tuple[int, ...]:
+        """Release a single cache group's contiguous request tail."""
+        if len(self.single_type_managers) != 1:
+            raise ValueError(
+                "KV cache compression currently requires exactly one cache group"
+            )
+        if len(expected_block_ids) != 1:
+            raise ValueError(
+                "KV cache compression plan must contain exactly one block table"
+            )
+        return self.single_type_managers[0].truncate_request_tail_blocks(
+            request_id,
+            num_blocks_to_keep,
+            expected_block_ids[0],
+        )
+
+    def validate_request_tail_truncation(
+        self,
+        request_id: str,
+        num_blocks_to_keep: int,
+        expected_block_ids: tuple[tuple[int, ...], ...],
+    ) -> None:
+        """Validate a single cache group's tail transaction without mutation."""
+        if len(self.single_type_managers) != 1:
+            raise ValueError(
+                "KV cache compression currently requires exactly one cache group"
+            )
+        if len(expected_block_ids) != 1:
+            raise ValueError(
+                "KV cache compression plan must contain exactly one block table"
+            )
+        self.single_type_managers[0].validate_request_tail_truncation(
+            request_id,
+            num_blocks_to_keep,
+            expected_block_ids[0],
+        )
+
     @abstractmethod
     def find_longest_cache_hit(
         self,
@@ -618,7 +660,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 for gid in group.group_ids:
                     self.single_type_managers[gid].use_eagle = True
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> int:
         # Cache hits in this coordinator are always a multiple of
         # ``scheduler_block_size`` tokens (see ``find_longest_cache_hit``).
         # Within an aligned region, SWA groups may only consult a subset of blocks
@@ -627,6 +669,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         aligned_num_computed_tokens = (
             num_computed_tokens // self.scheduler_block_size * self.scheduler_block_size
         )
+        cached_blocks_per_manager = []
         for manager in self.single_type_managers:
             num_tokens_to_cache = aligned_num_computed_tokens
             # EAGLE groups match one block past each aligned boundary and drop
@@ -640,11 +683,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             # (``scheduler_block_size``); retention is passed separately so it
             # can keep both the coarse segment tails and the fine replay
             # boundary (which needs the fine value).
-            manager.cache_blocks(
-                request,
-                num_tokens_to_cache,
-                retention_interval=self.retention_interval,
+            cached_blocks_per_manager.append(
+                manager.cache_blocks(
+                    request,
+                    num_tokens_to_cache,
+                    retention_interval=self.retention_interval,
+                )
             )
+        return max(cached_blocks_per_manager, default=0)
 
     def find_longest_cache_hit(
         self,
