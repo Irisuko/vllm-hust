@@ -12,7 +12,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
 from functools import partial
-from inspect import isclass, signature
+from inspect import Parameter, isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
 from typing import Any, TypeVar, cast
@@ -94,6 +94,16 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
+
+def _scheduler_accepts_kv_cache_compression_runtime_spec(
+    scheduler_cls: type,
+) -> bool:
+    parameters = signature(scheduler_cls).parameters
+    return "kv_cache_compression_runtime_spec" in parameters or any(
+        parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+
+
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
@@ -144,8 +154,7 @@ class EngineCore:
 
         if (
             self.kv_cache_compression_runtime_spec is not None
-            and "kv_cache_compression_runtime_spec"
-            not in signature(Scheduler.__init__).parameters
+            and not _scheduler_accepts_kv_cache_compression_runtime_spec(Scheduler)
         ):
             raise KVCacheCompressionError(
                 "KV cache compression requires a V1 Scheduler implementing "
