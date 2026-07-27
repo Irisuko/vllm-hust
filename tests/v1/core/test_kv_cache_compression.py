@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.core.utils import create_scheduler
 from vllm.config import KVCacheCompressionConfig
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
@@ -21,10 +22,15 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
 )
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import core as engine_core_module
-from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.core import (
+    EngineCore,
+    _scheduler_accepts_kv_cache_compression_runtime_spec,
+)
 from vllm.v1.kv_cache_compression import (
     KVCacheCompressionCompatibility,
     KVCacheCompressionError,
@@ -37,11 +43,21 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
+from vllm.v1.kv_cache_spec_registry import _REGISTRY_KVCACHESPEC_LIST
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.worker.worker_base import WorkerBase
 
 init_none_hash(sha256)
+
+
+@pytest.fixture(autouse=True)
+def restore_kv_cache_spec_registry():
+    registry = _REGISTRY_KVCACHESPEC_LIST.copy()
+    _REGISTRY_KVCACHESPEC_LIST.clear()
+    yield
+    _REGISTRY_KVCACHESPEC_LIST.clear()
+    _REGISTRY_KVCACHESPEC_LIST.update(registry)
 
 
 def _config() -> KVCacheCompressionConfig:
@@ -118,10 +134,22 @@ def test_enabled_engine_uses_worker_report() -> None:
 
 def test_compatibility_check_precedes_memory_and_kv_allocation(monkeypatch) -> None:
     events = []
+
+    def get_kv_cache_specs():
+        events.append("specs")
+        return [{"layer": object()}]
+
+    def determine_available_memory():
+        events.append("memory")
+        return [1024]
+
+    def initialize_from_config(configs):
+        events.append("initialize")
+
     model_executor = SimpleNamespace(
-        get_kv_cache_specs=lambda: events.append("specs") or [{"layer": object()}],
-        determine_available_memory=lambda: events.append("memory") or [1024],
-        initialize_from_config=lambda configs: events.append("initialize"),
+        get_kv_cache_specs=get_kv_cache_specs,
+        determine_available_memory=determine_available_memory,
+        initialize_from_config=initialize_from_config,
     )
     scheduler_cache_config = SimpleNamespace(num_blocks=0, kv_cache_groups=[])
     monkeypatch.setattr(
@@ -157,6 +185,18 @@ def test_compatibility_check_precedes_memory_and_kv_allocation(monkeypatch) -> N
 
     assert result is scheduler_cache_config
     assert events == ["specs", "validate", "memory", "initialize"]
+
+
+def test_async_scheduler_accepts_runtime_spec_via_kwargs() -> None:
+    class UnsupportedScheduler:
+        def __init__(self, value) -> None:
+            self.value = value
+
+    assert _scheduler_accepts_kv_cache_compression_runtime_spec(Scheduler)
+    assert _scheduler_accepts_kv_cache_compression_runtime_spec(AsyncScheduler)
+    assert not _scheduler_accepts_kv_cache_compression_runtime_spec(
+        UnsupportedScheduler
+    )
 
 
 def test_all_worker_incompatibilities_are_reported() -> None:
@@ -303,6 +343,55 @@ def _commit_result() -> KVCacheCompressionCommitResult:
         destination_block_ids=(0, 1),
         released_block_ids=(2,),
         retained_hashed_source_block_ids=(),
+    )
+
+
+def _scheduler_output_with_transactions(
+    transactions: dict[str, int],
+) -> SchedulerOutput:
+    output = SchedulerOutput.make_empty()
+    output.kv_cache_compression_transaction_ids = transactions
+    return output
+
+
+def _async_compression_scheduler(
+    *,
+    enable_prefix_caching: bool = False,
+    long_prefill_token_threshold: int = 0,
+    num_blocks: int = 64,
+) -> AsyncScheduler:
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        max_model_len=1024,
+        block_size=128,
+        num_blocks=num_blocks,
+        async_scheduling=True,
+        enable_prefix_caching=enable_prefix_caching,
+        long_prefill_token_threshold=long_prefill_token_threshold,
+        kv_cache_compression_config=_config(),
+        kv_cache_compression_runtime_spec=_runtime_spec(),
+    )
+    assert isinstance(scheduler, AsyncScheduler)
+    return scheduler
+
+
+def _waiting_request(request_id: str, prompt_len: int) -> Request:
+    request = _running_request(request_id, prompt_len)
+    request.status = RequestStatus.WAITING
+    return request
+
+
+def _single_layer_plan(
+    request: Request, expected_block_ids: tuple[int, ...]
+) -> KVCacheCompressionPlan:
+    return KVCacheCompressionPlan(
+        schema_version=1,
+        provider="pyramidkv_ascend",
+        request_id=request.request_id,
+        semantic_num_tokens=request.num_prompt_tokens,
+        physical_num_tokens=192,
+        per_layer_physical_num_tokens=(("layer", 192),),
+        expected_block_ids=(expected_block_ids,),
     )
 
 
@@ -525,6 +614,7 @@ def test_commit_ack_is_not_visible_until_plan_commit_and_next_schedule() -> None
     plan = _plan(request, (0, 1, 2))
     scheduler = SimpleNamespace(
         _pending_kv_cache_compression_block_table_updates=set(),
+        _inflight_kv_cache_compression_transactions={request.request_id: 1},
         requests={request.request_id: request},
         kv_cache_manager=SimpleNamespace(
             validate_compression_plan=lambda actual_request, actual_plan: 2,
@@ -541,6 +631,7 @@ def test_commit_ack_is_not_visible_until_plan_commit_and_next_schedule() -> None
     )
     Scheduler._apply_kv_cache_compression_plans(
         scheduler,
+        _scheduler_output_with_transactions({request.request_id: 1}),
         ModelRunnerOutput(
             req_ids=[],
             req_id_to_index={},
@@ -608,7 +699,7 @@ def test_invalid_plan_is_rejected_before_commit(plan_update, error_match) -> Non
 
 
 def test_disabled_transfer_and_wrong_block_size_are_rejected() -> None:
-    cases = [
+    cases: list[tuple[KVCacheManager, dict | None, str]] = [
         (_manager(), None, "feature is disabled"),
         (_manager(compression_config=_config()), {}, "KV transfer"),
     ]
@@ -665,6 +756,15 @@ def test_scheduler_commits_plans_and_rejects_them_when_disabled() -> None:
     plan = _plan(request, (0, 1, 2))
     calls = []
     validations = []
+
+    def validate_compression_plan(actual_request, actual_plan):
+        validations.append((actual_request, actual_plan))
+        return 2
+
+    def apply_compression_plan(actual_request, actual_plan):
+        calls.append((actual_request, actual_plan))
+        return _commit_result()
+
     output = ModelRunnerOutput(
         req_ids=[],
         req_id_to_index={},
@@ -672,18 +772,16 @@ def test_scheduler_commits_plans_and_rejects_them_when_disabled() -> None:
     )
     scheduler = SimpleNamespace(
         _pending_kv_cache_compression_block_table_updates=set(),
+        _inflight_kv_cache_compression_transactions={request.request_id: 1},
         requests={request.request_id: request},
         kv_cache_manager=SimpleNamespace(
-            validate_compression_plan=lambda actual_request, actual_plan: (
-                validations.append((actual_request, actual_plan)) or 2
-            ),
-            apply_compression_plan=lambda actual_request, actual_plan: (
-                calls.append((actual_request, actual_plan)) or _commit_result()
-            ),
+            validate_compression_plan=validate_compression_plan,
+            apply_compression_plan=apply_compression_plan,
         ),
     )
 
-    Scheduler._apply_kv_cache_compression_plans(scheduler, output)
+    scheduler_output = _scheduler_output_with_transactions({request.request_id: 1})
+    Scheduler._apply_kv_cache_compression_plans(scheduler, scheduler_output, output)
 
     assert validations == [(request, plan)]
     assert calls == [(request, plan)]
@@ -692,8 +790,13 @@ def test_scheduler_commits_plans_and_rejects_them_when_disabled() -> None:
     }
 
     scheduler._pending_kv_cache_compression_block_table_updates = None
+    scheduler._inflight_kv_cache_compression_transactions = {request.request_id: 2}
     with pytest.raises(RuntimeError, match="feature is disabled"):
-        Scheduler._apply_kv_cache_compression_plans(scheduler, output)
+        Scheduler._apply_kv_cache_compression_plans(
+            scheduler,
+            _scheduler_output_with_transactions({request.request_id: 2}),
+            output,
+        )
 
 
 def test_scheduler_validates_all_plans_before_reclaiming_any_blocks() -> None:
@@ -717,17 +820,261 @@ def test_scheduler_validates_all_plans_before_reclaiming_any_blocks() -> None:
     )
     scheduler = SimpleNamespace(
         _pending_kv_cache_compression_block_table_updates=set(),
+        _inflight_kv_cache_compression_transactions={"first": 1, "second": 1},
         requests={first.request_id: first, second.request_id: second},
         kv_cache_manager=manager,
     )
 
     with pytest.raises(KVCacheCompressionError, match="block table changed"):
-        Scheduler._apply_kv_cache_compression_plans(scheduler, output)
+        Scheduler._apply_kv_cache_compression_plans(
+            scheduler,
+            _scheduler_output_with_transactions({"first": 1, "second": 1}),
+            output,
+        )
 
     assert manager.get_block_ids(first.request_id) == ([*first_blocks],)
     assert manager.get_block_ids(second.request_id) == ([*second_blocks],)
     assert manager.block_pool.get_num_free_blocks() == free_before
     assert not scheduler._pending_kv_cache_compression_block_table_updates
+
+
+def test_scheduler_rejects_missing_duplicate_and_unexpected_plans() -> None:
+    request = _running_request()
+    plan = _plan(request, (0, 1, 2))
+    scheduler = SimpleNamespace(
+        _pending_kv_cache_compression_block_table_updates=set(),
+        _inflight_kv_cache_compression_transactions={request.request_id: 1},
+        requests={request.request_id: request},
+        kv_cache_manager=SimpleNamespace(),
+    )
+    scheduler_output = _scheduler_output_with_transactions({request.request_id: 1})
+
+    with pytest.raises(RuntimeError, match="did not return"):
+        Scheduler._apply_kv_cache_compression_plans(
+            scheduler,
+            scheduler_output,
+            ModelRunnerOutput(req_ids=[], req_id_to_index={}),
+        )
+
+    duplicate_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_cache_compression_plans=[plan, plan],
+    )
+    with pytest.raises(RuntimeError, match="duplicate"):
+        Scheduler._apply_kv_cache_compression_plans(
+            scheduler, scheduler_output, duplicate_output
+        )
+
+    unexpected_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_cache_compression_plans=[plan],
+    )
+    with pytest.raises(RuntimeError, match="unexpected"):
+        Scheduler._apply_kv_cache_compression_plans(
+            scheduler,
+            _scheduler_output_with_transactions({"other": 1}),
+            unexpected_output,
+        )
+
+
+def test_stale_transaction_output_is_ignored_after_same_id_restarts() -> None:
+    request = _running_request()
+    plan = _plan(request, (0, 1, 2))
+    calls = []
+    scheduler = SimpleNamespace(
+        _pending_kv_cache_compression_block_table_updates=set(),
+        _inflight_kv_cache_compression_transactions={request.request_id: 2},
+        requests={request.request_id: request},
+        kv_cache_manager=SimpleNamespace(
+            validate_compression_plan=lambda *args: calls.append("validate"),
+            apply_compression_plan=lambda *args: calls.append("apply"),
+        ),
+    )
+
+    Scheduler._apply_kv_cache_compression_plans(
+        scheduler,
+        _scheduler_output_with_transactions({request.request_id: 1}),
+        ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            kv_cache_compression_plans=[plan],
+        ),
+    )
+
+    assert calls == []
+    assert scheduler._inflight_kv_cache_compression_transactions == {
+        request.request_id: 2
+    }
+    assert not scheduler._pending_kv_cache_compression_block_table_updates
+
+
+@pytest.mark.parametrize("enable_prefix_caching", [False, True])
+def test_async_scheduler_fences_final_prefill_until_commit_ack(
+    enable_prefix_caching: bool,
+) -> None:
+    scheduler = _async_compression_scheduler(
+        enable_prefix_caching=enable_prefix_caching
+    )
+    request = _waiting_request("compressed", 384)
+    scheduler.add_request(request)
+
+    final_prefill_output = scheduler.schedule()
+    transaction_id = final_prefill_output.kv_cache_compression_transaction_ids
+    assert transaction_id == {request.request_id: 1}
+    assert final_prefill_output.num_scheduled_tokens == {request.request_id: 384}
+    destinations = final_prefill_output.kv_cache_compression_destination_block_ids
+    assert bool(destinations) is enable_prefix_caching
+
+    blocked_output = scheduler.schedule()
+    assert request.request_id not in blocked_output.num_scheduled_tokens
+
+    other = _waiting_request("ordinary", 128)
+    scheduler.add_request(other)
+    overlap_output = scheduler.schedule()
+    assert overlap_output.num_scheduled_tokens == {other.request_id: 128}
+    assert overlap_output.kv_cache_compression_transaction_ids is None
+
+    source_blocks = tuple(
+        scheduler.kv_cache_manager.get_block_ids(request.request_id)[0]
+    )
+    Scheduler._apply_kv_cache_compression_plans(
+        scheduler,
+        final_prefill_output,
+        ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            kv_cache_compression_plans=[_single_layer_plan(request, source_blocks)],
+        ),
+    )
+
+    first_decode_output = scheduler.schedule()
+    assert request.request_id in first_decode_output.num_scheduled_tokens
+    assert first_decode_output.kv_cache_compression_block_table_updates == {
+        request.request_id: scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    }
+    next_output = scheduler.schedule()
+    assert next_output.kv_cache_compression_block_table_updates is None
+
+
+def test_async_chunked_prefill_only_fences_the_final_chunk() -> None:
+    scheduler = _async_compression_scheduler(long_prefill_token_threshold=256)
+    request = _waiting_request("chunked", 384)
+    scheduler.add_request(request)
+
+    intermediate = scheduler.schedule()
+    assert intermediate.num_scheduled_tokens == {request.request_id: 256}
+    assert intermediate.kv_cache_compression_transaction_ids is None
+
+    final = scheduler.schedule()
+    assert final.num_scheduled_tokens == {request.request_id: 128}
+    assert final.kv_cache_compression_transaction_ids == {request.request_id: 2}
+
+    blocked = scheduler.schedule()
+    assert request.request_id not in blocked.num_scheduled_tokens
+
+
+def test_async_abort_cancels_transaction_and_ignores_returned_plan() -> None:
+    scheduler = _async_compression_scheduler()
+    request = _waiting_request("aborted", 384)
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    source_blocks = tuple(
+        scheduler.kv_cache_manager.get_block_ids(request.request_id)[0]
+    )
+
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    Scheduler._apply_kv_cache_compression_plans(
+        scheduler,
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            kv_cache_compression_plans=[_single_layer_plan(request, source_blocks)],
+        ),
+    )
+
+    assert request.request_id not in scheduler.requests
+    assert not scheduler._inflight_kv_cache_compression_transactions
+    assert not scheduler._pending_kv_cache_compression_block_table_updates
+
+
+def test_async_prefix_reset_restarts_request_with_a_new_transaction() -> None:
+    scheduler = _async_compression_scheduler(enable_prefix_caching=True)
+    request = _waiting_request("reset", 384)
+    scheduler.add_request(request)
+    stale_output = scheduler.schedule()
+    stale_transaction_id = stale_output.kv_cache_compression_transaction_ids
+    assert stale_transaction_id == {request.request_id: 1}
+    stale_source_blocks = tuple(
+        scheduler.kv_cache_manager.get_block_ids(request.request_id)[0]
+    )
+
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert not scheduler._inflight_kv_cache_compression_transactions
+
+    restarted_output = scheduler.schedule()
+    restarted_transaction_id = restarted_output.kv_cache_compression_transaction_ids
+    assert restarted_transaction_id == {request.request_id: 2}
+
+    Scheduler._apply_kv_cache_compression_plans(
+        scheduler,
+        stale_output,
+        ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            kv_cache_compression_plans=[
+                _single_layer_plan(request, stale_source_blocks)
+            ],
+        ),
+    )
+
+    assert scheduler._inflight_kv_cache_compression_transactions == {
+        request.request_id: 2
+    }
+    assert not scheduler._pending_kv_cache_compression_block_table_updates
+
+
+def test_preemption_selection_excludes_compression_transactions() -> None:
+    eligible = SimpleNamespace(request_id="eligible", priority=10, arrival_time=10.0)
+    fenced = SimpleNamespace(request_id="fenced", priority=100, arrival_time=100.0)
+
+    class StubVictimSelector:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, object, dict[str, object]]] = []
+
+        def pick_victim(self, running, policy, **kwargs):
+            self.calls.append((running, policy, kwargs))
+            return running[0]
+
+    victim_selector = StubVictimSelector()
+    scheduler = SimpleNamespace(
+        running=[eligible, fenced],
+        policy=SchedulingPolicy.PRIORITY,
+        victim_selector=victim_selector,
+        kv_cache_manager=SimpleNamespace(usage=0.5),
+        _inflight_kv_cache_compression_transactions={"fenced": 1},
+    )
+
+    assert Scheduler._select_preemption_candidate(scheduler, 42.0) is eligible
+    assert victim_selector.calls == [
+        (
+            [eligible],
+            SchedulingPolicy.PRIORITY,
+            {"kv_utilization": 0.5, "now_s": 42.0},
+        )
+    ]
+
+
+def test_normal_preemption_rejects_compression_transaction() -> None:
+    request = _running_request()
+    scheduler = SimpleNamespace(
+        _inflight_kv_cache_compression_transactions={request.request_id: 1}
+    )
+
+    with pytest.raises(RuntimeError, match="compression transaction is in flight"):
+        Scheduler._preempt_request(scheduler, request, 0.0)
 
 
 def test_output_contracts_are_none_on_default_path() -> None:
@@ -739,3 +1086,4 @@ def test_output_contracts_are_none_on_default_path() -> None:
     assert (
         SchedulerOutput.make_empty().kv_cache_compression_destination_block_ids is None
     )
+    assert SchedulerOutput.make_empty().kv_cache_compression_transaction_ids is None
