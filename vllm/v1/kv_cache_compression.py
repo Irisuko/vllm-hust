@@ -62,7 +62,7 @@ class KVCacheCompressionPlan:
 def ensure_kv_cache_compression_compatible(
     config: "KVCacheCompressionConfig",
     reports: list[KVCacheCompressionCompatibility],
-) -> None:
+) -> KVCacheCompressionRuntimeSpec:
     """Validate every worker report and aggregate all incompatibilities."""
     errors: list[str] = []
     if not reports:
@@ -90,6 +90,42 @@ def ensure_kv_cache_compression_compatible(
                 errors.extend(f"{prefix}: {reason}" for reason in report.reasons)
             else:
                 errors.append(f"{prefix}: provider is unsupported")
+        elif report.runtime_spec is None:
+            errors.append(f"{prefix}: supported report has no runtime spec")
+
+    runtime_specs = [
+        (rank, report.runtime_spec)
+        for rank, report in enumerate(reports)
+        if report.supported and report.runtime_spec is not None
+    ]
+    if runtime_specs:
+        expected_rank, expected_spec = runtime_specs[0]
+        if expected_spec.schema_version != config.schema_version:
+            errors.append(
+                "worker runtime spec schema_version "
+                f"{expected_spec.schema_version} does not match requested "
+                f"{config.schema_version}"
+            )
+        if expected_spec.provider != config.provider:
+            errors.append(
+                f"worker runtime spec provider {expected_spec.provider!r} does "
+                f"not match requested {config.provider!r}"
+            )
+        if expected_spec.compression_threshold_tokens <= 0:
+            errors.append("runtime compression threshold must be positive")
+        if expected_spec.required_recompute_tokens <= 0:
+            errors.append("runtime recompute window must be positive")
+        if expected_spec.max_physical_num_tokens <= 0:
+            errors.append("runtime maximum physical length must be positive")
+        for rank, runtime_spec in runtime_specs[1:]:
+            if runtime_spec != expected_spec:
+                errors.append(
+                    f"worker {rank} runtime spec does not match worker "
+                    f"{expected_rank}: "
+                    f"{runtime_spec!r} != {expected_spec!r}"
+                )
+    else:
+        expected_spec = None
 
     if errors:
         details = "\n - ".join(errors)
@@ -97,3 +133,6 @@ def ensure_kv_cache_compression_compatible(
             "KV cache compression compatibility check failed for provider "
             f"{config.provider!r}:\n - {details}"
         )
+
+    assert expected_spec is not None
+    return expected_spec

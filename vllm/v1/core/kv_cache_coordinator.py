@@ -421,6 +421,55 @@ class KVCacheCoordinator(ABC):
             expected_block_ids[0],
         )
 
+    def validate_request_block_replacement(
+        self,
+        request_id: str,
+        num_destination_blocks: int,
+        expected_source_block_ids: tuple[tuple[int, ...], ...],
+        destination_blocks: Sequence[KVCacheBlock],
+    ) -> None:
+        """Validate a single-group out-of-place compression transaction."""
+        if len(self.single_type_managers) != 1:
+            raise ValueError(
+                "KV cache compression currently requires exactly one cache group"
+            )
+        if len(expected_source_block_ids) != 1:
+            raise ValueError(
+                "KV cache compression plan must contain exactly one block table"
+            )
+        self.single_type_managers[0].validate_request_block_replacement(
+            request_id,
+            num_destination_blocks,
+            expected_source_block_ids[0],
+            destination_blocks,
+        )
+
+    def replace_request_blocks(
+        self,
+        request_id: str,
+        num_destination_blocks: int,
+        expected_source_block_ids: tuple[tuple[int, ...], ...],
+        destination_blocks: list[KVCacheBlock],
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+        tuple[int, ...],
+    ]:
+        """Install one private destination table for a compression plan."""
+        self.validate_request_block_replacement(
+            request_id,
+            num_destination_blocks,
+            expected_source_block_ids,
+            destination_blocks,
+        )
+        return self.single_type_managers[0].replace_request_blocks(
+            request_id,
+            num_destination_blocks,
+            expected_source_block_ids[0],
+            destination_blocks,
+        )
+
     @abstractmethod
     def find_longest_cache_hit(
         self,
