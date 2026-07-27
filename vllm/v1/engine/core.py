@@ -79,6 +79,8 @@ from vllm.v1.engine.utils import (
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_compression import (
     KVCacheCompressionCompatibility,
+    KVCacheCompressionError,
+    KVCacheCompressionRuntimeSpec,
     ensure_kv_cache_compression_compatible,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
@@ -140,6 +142,18 @@ class EngineCore:
         # Setup scheduler.
         Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
 
+        if (
+            self.kv_cache_compression_runtime_spec is not None
+            and "kv_cache_compression_runtime_spec"
+            not in signature(Scheduler.__init__).parameters
+        ):
+            raise KVCacheCompressionError(
+                "KV cache compression requires a V1 Scheduler implementing "
+                "the kv_cache_compression_runtime_spec interface; custom "
+                f"scheduler {Scheduler.__module__}.{Scheduler.__qualname__} "
+                "does not implement it"
+            )
+
         if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
             # Encoder models without KV cache don't support
             # chunked prefill. But do SSM models?
@@ -159,6 +173,7 @@ class EngineCore:
             log_stats=self.log_stats,
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            kv_cache_compression_runtime_spec=(self.kv_cache_compression_runtime_spec),
         )
         self.scheduler.available_kv_cache_memory_bytes = (
             self.available_gpu_memory_for_kv_cache
@@ -258,7 +273,9 @@ class EngineCore:
         # Compression compatibility is an enabled-only worker RPC. It runs
         # after model/backend discovery but before memory profiling and formal
         # KV tensor allocation.
-        self._validate_kv_cache_compression(vllm_config)
+        self.kv_cache_compression_runtime_spec = self._validate_kv_cache_compression(
+            vllm_config
+        )
 
         # Some layers (e.g. Prefix LM attention) run non-causally and tag their
         # KV cache spec with ``non_causal=True``. The specs are collected here in
@@ -361,15 +378,17 @@ class EngineCore:
             )
         return scheduler_kv_cache_config
 
-    def _validate_kv_cache_compression(self, vllm_config: VllmConfig) -> None:
+    def _validate_kv_cache_compression(
+        self, vllm_config: VllmConfig
+    ) -> KVCacheCompressionRuntimeSpec | None:
         config = vllm_config.kv_cache_compression_config
         if config is None:
-            return
+            return None
 
         reports: list[KVCacheCompressionCompatibility] = self.collective_rpc(
             "validate_kv_cache_compression"
         )
-        ensure_kv_cache_compression_compatible(config, reports)
+        runtime_spec = ensure_kv_cache_compression_compatible(config, reports)
         for rank, report in enumerate(reports):
             logger.info(
                 "KV cache compression compatibility passed: provider=%s "
@@ -386,6 +405,18 @@ class EngineCore:
                 report.block_size,
                 report.provider_factory,
             )
+        logger.info(
+            "KV cache compression runtime spec: provider=%s schema_version=%d "
+            "private_destination=%s threshold_tokens=%d recompute_tokens=%d "
+            "max_physical_tokens=%d",
+            runtime_spec.provider,
+            runtime_spec.schema_version,
+            runtime_spec.requires_private_destination,
+            runtime_spec.compression_threshold_tokens,
+            runtime_spec.required_recompute_tokens,
+            runtime_spec.max_physical_num_tokens,
+        )
+        return runtime_spec
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks

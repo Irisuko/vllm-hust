@@ -59,6 +59,10 @@ from vllm.v1.core.sched.victim_selector import (
     infer_kv_utilization_from_scheduler,
 )
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.kv_cache_compression import (
+    KVCacheCompressionError,
+    KVCacheCompressionRuntimeSpec,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -83,6 +87,9 @@ class Scheduler(SchedulerInterface):
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
+        kv_cache_compression_runtime_spec: (
+            KVCacheCompressionRuntimeSpec | None
+        ) = None,
     ) -> None:
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -100,6 +107,14 @@ class Scheduler(SchedulerInterface):
             )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
+        self.kv_cache_compression_runtime_spec = kv_cache_compression_runtime_spec
+        if (
+            vllm_config.kv_cache_compression_config is not None
+            and kv_cache_compression_runtime_spec is None
+        ):
+            raise KVCacheCompressionError(
+                "enabled KV cache compression has no worker runtime spec"
+            )
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -280,14 +295,11 @@ class Scheduler(SchedulerInterface):
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
-            kv_cache_compression_config=(
-                vllm_config.kv_cache_compression_config
-            ),
+            kv_cache_compression_config=(vllm_config.kv_cache_compression_config),
+            kv_cache_compression_runtime_spec=(kv_cache_compression_runtime_spec),
         )
         self._pending_kv_cache_compression_block_table_updates: set[str] | None = (
-            set()
-            if vllm_config.kv_cache_compression_config is not None
-            else None
+            set() if vllm_config.kv_cache_compression_config is not None else None
         )
         prefix_cache_snapshot = (
             self.kv_cache_manager.get_prefix_cache_snapshot(
@@ -466,6 +478,7 @@ class Scheduler(SchedulerInterface):
         preempted_reqs: list[Request] = []
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
+        compression_destination_block_ids: dict[str, tuple[list[int], ...]] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         if self._pause_state == PauseState.PAUSED_ALL:
@@ -584,15 +597,33 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Schedule newly needed KV blocks for the request.
+            compression_destination_blocks = 0
+            if (
+                request.num_computed_tokens < request.num_prompt_tokens
+                and request.num_computed_tokens + num_new_tokens
+                == request.num_prompt_tokens
+            ):
+                compression_destination_blocks = (
+                    self.kv_cache_manager.get_num_compression_destination_blocks(
+                        request
+                    )
+                )
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
+                        reserved_blocks=compression_destination_blocks,
                     )
 
                     if new_blocks is not None:
+                        if compression_destination_blocks:
+                            compression_destination_block_ids[request.request_id] = (
+                                self.kv_cache_manager.reserve_compression_destination(
+                                    request
+                                )
+                            )
                         # The request can be scheduled.
                         break
 
@@ -610,6 +641,9 @@ class Scheduler(SchedulerInterface):
                         scheduled_running_reqs.remove(preempted_req)
                         token_budget += num_scheduled_tokens.pop(preempted_req_id)
                         req_to_new_blocks.pop(preempted_req_id)
+                        compression_destination_block_ids.pop(
+                            preempted_req_id, None
+                        )
                         scheduled_spec_decode_tokens.pop(preempted_req_id, None)
                         preempted_encoder_inputs = scheduled_encoder_inputs.pop(
                             preempted_req_id, None
@@ -955,6 +989,19 @@ class Scheduler(SchedulerInterface):
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
 
+                compression_destination_blocks = 0
+                if (
+                    num_computed_tokens < request.num_prompt_tokens
+                    and num_computed_tokens + num_new_tokens
+                    == request.num_prompt_tokens
+                ):
+                    compression_destination_blocks = (
+                        self.kv_cache_manager.get_num_compression_destination_blocks(
+                            request
+                        )
+                    )
+                    reserved_blocks += compression_destination_blocks
+
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -992,6 +1039,11 @@ class Scheduler(SchedulerInterface):
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
                     continue
+
+                if compression_destination_blocks:
+                    compression_destination_block_ids[request_id] = (
+                        self.kv_cache_manager.reserve_compression_destination(request)
+                    )
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -1136,9 +1188,7 @@ class Scheduler(SchedulerInterface):
             )
 
         kv_cache_compression_block_table_updates = (
-            self._take_kv_cache_compression_block_table_updates(
-                num_scheduled_tokens
-            )
+            self._take_kv_cache_compression_block_table_updates(num_scheduled_tokens)
         )
 
         # Record the request ids that were scheduled in this step (MRV1-only).
@@ -1176,6 +1226,9 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             kv_cache_compression_block_table_updates=(
                 kv_cache_compression_block_table_updates
+            ),
+            kv_cache_compression_destination_block_ids=(
+                compression_destination_block_ids or None
             ),
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
@@ -1226,6 +1279,12 @@ class Scheduler(SchedulerInterface):
             for request_id in scheduled_pending
         }
         pending.difference_update(scheduled_pending)
+        for request_id, block_ids in updates.items():
+            logger.info(
+                "KV cache compression commit ack: request_id=%s destination_blocks=%d",
+                request_id,
+                sum(len(group) for group in block_ids),
+            )
         return updates
 
     def _build_kv_connector_meta(
@@ -1977,18 +2036,21 @@ class Scheduler(SchedulerInterface):
             self.kv_cache_manager.validate_compression_plan(request, plan)
 
         for request, plan in live_plans:
-            released_ids = self.kv_cache_manager.apply_compression_plan(
-                request, plan
-            )
+            commit = self.kv_cache_manager.apply_compression_plan(request, plan)
             pending.add(plan.request_id)
             logger.info(
                 "Committed KV cache compression plan: provider=%s request_id=%s "
-                "semantic_tokens=%d physical_tokens=%d released_blocks=%s",
+                "semantic_tokens=%d physical_tokens=%d source_blocks=%d "
+                "destination_blocks=%d released_blocks=%s "
+                "retained_hashed_source_blocks=%s commit_ack=pending",
                 plan.provider,
                 plan.request_id,
                 plan.semantic_num_tokens,
                 plan.physical_num_tokens,
-                released_ids,
+                len(commit.source_block_ids),
+                len(commit.destination_block_ids),
+                commit.released_block_ids,
+                commit.retained_hashed_source_block_ids,
             )
 
     @staticmethod

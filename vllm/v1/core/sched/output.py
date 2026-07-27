@@ -241,6 +241,11 @@ class SchedulerOutput:
         dict[str, tuple[list[int], ...]] | None
     ) = None
 
+    # Exclusive, unhashed target tables for final compression prefill steps.
+    kv_cache_compression_destination_block_ids: (
+        dict[str, tuple[list[int], ...]] | None
+    ) = None
+
     # Block IDs freshly allocated from the pool during this scheduling step.
     # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.

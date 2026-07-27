@@ -12,7 +12,15 @@ import torch
 from vllm.config import KVCacheCompressionConfig
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_manager import (
+    KVCacheCompressionCommitResult,
+    KVCacheManager,
+)
+from vllm.v1.core.kv_cache_utils import (
+    get_request_block_hasher,
+    init_none_hash,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import core as engine_core_module
@@ -21,6 +29,7 @@ from vllm.v1.kv_cache_compression import (
     KVCacheCompressionCompatibility,
     KVCacheCompressionError,
     KVCacheCompressionPlan,
+    KVCacheCompressionRuntimeSpec,
     ensure_kv_cache_compression_compatible,
 )
 from vllm.v1.kv_cache_interface import (
@@ -32,11 +41,24 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.worker.worker_base import WorkerBase
 
+init_none_hash(sha256)
+
 
 def _config() -> KVCacheCompressionConfig:
     return KVCacheCompressionConfig(
         provider="pyramidkv_ascend",
         provider_config={"window_size": 8},
+    )
+
+
+def _runtime_spec() -> KVCacheCompressionRuntimeSpec:
+    return KVCacheCompressionRuntimeSpec(
+        schema_version=1,
+        provider="pyramidkv_ascend",
+        requires_private_destination=True,
+        compression_threshold_tokens=256,
+        required_recompute_tokens=8,
+        max_physical_num_tokens=512,
     )
 
 
@@ -55,6 +77,7 @@ def _report(
         reasons=reasons,
         platform=platform,
         provider_factory="fake.provider:create",
+        runtime_spec=_runtime_spec() if supported else None,
     )
 
 
@@ -171,6 +194,15 @@ def test_malformed_worker_report_is_rejected(report) -> None:
         ensure_kv_cache_compression_compatible(_config(), [report])
 
 
+def test_worker_runtime_specs_must_match() -> None:
+    mismatched = replace(
+        _report(),
+        runtime_spec=replace(_runtime_spec(), max_physical_num_tokens=513),
+    )
+    with pytest.raises(KVCacheCompressionError, match="runtime spec"):
+        ensure_kv_cache_compression_compatible(_config(), [_report(), mismatched])
+
+
 def test_base_worker_does_not_import_provider() -> None:
     provider_module = "fake_kv_cache_compression_provider"
     sys.modules.pop(provider_module, None)
@@ -193,6 +225,7 @@ def test_base_worker_does_not_import_provider() -> None:
 def _manager(
     *,
     block_size: int = 128,
+    num_blocks: int = 8,
     enable_caching: bool = False,
     compression_config: KVCacheCompressionConfig | None = None,
 ) -> KVCacheManager:
@@ -203,7 +236,7 @@ def _manager(
         dtype=torch.bfloat16,
     )
     cache_config = KVCacheConfig(
-        num_blocks=8,
+        num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(["layer0", "layer1"], spec)],
     )
@@ -214,6 +247,9 @@ def _manager(
         hash_block_size=block_size,
         enable_caching=enable_caching,
         kv_cache_compression_config=compression_config,
+        kv_cache_compression_runtime_spec=(
+            _runtime_spec() if compression_config is not None else None
+        ),
     )
 
 
@@ -223,6 +259,7 @@ def _running_request(request_id: str = "request", prompt_len: int = 384) -> Requ
         prompt_token_ids=[1] * prompt_len,
         sampling_params=SamplingParams(max_tokens=128),
         pooling_params=None,
+        block_hasher=get_request_block_hasher(128, sha256),
     )
     request.status = RequestStatus.RUNNING
     return request
@@ -235,9 +272,12 @@ def _allocated_prefill(
     blocks = manager.allocate_slots(
         request,
         num_new_tokens=request.num_prompt_tokens,
+        reserved_blocks=manager.get_num_compression_destination_blocks(request),
         has_scheduled_reqs=False,
     )
     assert blocks is not None
+    if manager.get_num_compression_destination_blocks(request):
+        manager.reserve_compression_destination(request)
     request.num_computed_tokens = request.num_prompt_tokens
     return tuple(blocks.get_block_ids()[0])
 
@@ -257,6 +297,15 @@ def _plan(
     )
 
 
+def _commit_result() -> KVCacheCompressionCommitResult:
+    return KVCacheCompressionCommitResult(
+        source_block_ids=(0, 1, 2),
+        destination_block_ids=(0, 1),
+        released_block_ids=(2,),
+        retained_hashed_source_block_ids=(),
+    )
+
+
 def test_compression_plan_is_pickle_serializable() -> None:
     request = _running_request()
     plan = _plan(request, (0, 1, 2))
@@ -270,9 +319,9 @@ def test_plan_commit_reclaims_tail_and_decode_uses_physical_length() -> None:
     block_ids = _allocated_prefill(manager, request)
     free_before = manager.block_pool.get_num_free_blocks()
 
-    released_ids = manager.apply_compression_plan(request, _plan(request, block_ids))
+    commit = manager.apply_compression_plan(request, _plan(request, block_ids))
 
-    assert released_ids == (block_ids[-1],)
+    assert commit.released_block_ids == (block_ids[-1],)
     assert manager.get_block_ids(request.request_id) == ([*block_ids[:2]],)
     assert manager.block_pool.get_num_free_blocks() == free_before + 1
     assert manager.get_compressed_physical_num_tokens(request.request_id) == 192
@@ -290,13 +339,165 @@ def test_plan_commit_reclaims_tail_and_decode_uses_physical_length() -> None:
         has_scheduled_reqs=False,
     )
     assert other_blocks is not None
-    assert other_blocks.get_block_ids() == ([released_ids[0]],)
+    assert other_blocks.get_block_ids() == ([commit.released_block_ids[0]],)
 
     manager.free(request)
     assert manager.get_compressed_physical_num_tokens(request.request_id) is None
     manager.free(other)
     # One of the configured blocks is the pool's permanent null block.
     assert manager.block_pool.get_num_free_blocks() == 7
+
+
+def test_prefix_cache_commit_swaps_to_private_unhashed_destination() -> None:
+    manager = _manager(enable_caching=True, compression_config=_config())
+    request = _running_request()
+    source_ids = _allocated_prefill(manager, request)
+    destination_ids = manager.get_compression_destination_block_ids(request.request_id)
+    assert destination_ids is not None
+    assert set(source_ids).isdisjoint(destination_ids[0])
+    new_block_ids = manager.take_new_block_ids()
+    assert set(destination_ids[0]).issubset(new_block_ids)
+    assert manager.take_new_block_ids() == []
+    source_blocks = [manager.block_pool.blocks[i] for i in source_ids]
+    assert all(block.block_hash is not None for block in source_blocks)
+
+    commit = manager.apply_compression_plan(request, _plan(request, source_ids))
+
+    assert commit.source_block_ids == source_ids
+    assert commit.destination_block_ids == tuple(destination_ids[0][:2])
+    assert manager.get_block_ids(request.request_id) == (
+        list(commit.destination_block_ids),
+    )
+    assert commit.retained_hashed_source_block_ids == source_ids
+    assert all(block.ref_cnt == 0 for block in source_blocks)
+    destination_blocks = [
+        manager.block_pool.blocks[i] for i in commit.destination_block_ids
+    ]
+    assert all(
+        block.ref_cnt == 1 and block.block_hash is None for block in destination_blocks
+    )
+
+    manager.allocate_slots(request, num_new_tokens=1)
+    assert all(block.block_hash is None for block in destination_blocks)
+    manager.free(request)
+
+
+def test_prefix_hit_cap_preserves_full_query_window() -> None:
+    manager = _manager(enable_caching=True, compression_config=_config())
+    warm = _running_request("warm", prompt_len=769)
+    blocks = manager.allocate_slots(
+        warm,
+        num_new_tokens=warm.num_prompt_tokens,
+        has_scheduled_reqs=False,
+    )
+    assert blocks is not None
+    manager.free(warm)
+
+    cached = _running_request("cached", prompt_len=769)
+    computed, num_tokens = manager.get_computed_blocks(cached)
+
+    assert num_tokens == 640
+    assert len(computed.get_block_ids()[0]) == 5
+
+
+def test_prefix_plan_requires_live_private_destination() -> None:
+    manager = _manager(enable_caching=True, compression_config=_config())
+    request = _running_request()
+    blocks = manager.allocate_slots(
+        request,
+        num_new_tokens=request.num_prompt_tokens,
+        has_scheduled_reqs=False,
+    )
+    assert blocks is not None
+    request.num_computed_tokens = request.num_prompt_tokens
+    source_ids = tuple(blocks.get_block_ids()[0])
+
+    with pytest.raises(KVCacheCompressionError, match="no private"):
+        manager.apply_compression_plan(request, _plan(request, source_ids))
+
+    manager.free(request)
+
+
+def test_abort_releases_uncommitted_private_destination() -> None:
+    manager = _manager(enable_caching=True, compression_config=_config())
+    request = _running_request()
+    _allocated_prefill(manager, request)
+    manager.free(request)
+    assert manager.get_compression_destination_block_ids(request.request_id) is None
+    assert manager.block_pool.get_num_free_blocks() == 7
+
+
+def test_source_and_private_destination_must_fit_atomically() -> None:
+    manager = _manager(
+        num_blocks=6,
+        enable_caching=True,
+        compression_config=_config(),
+    )
+    request = _running_request()
+    free_before = manager.block_pool.get_num_free_blocks()
+
+    blocks = manager.allocate_slots(
+        request,
+        num_new_tokens=request.num_prompt_tokens,
+        reserved_blocks=manager.get_num_compression_destination_blocks(request),
+        has_scheduled_reqs=False,
+    )
+
+    assert blocks is None
+    assert manager.get_compression_destination_block_ids(request.request_id) is None
+    assert manager.block_pool.get_num_free_blocks() == free_before
+
+
+def test_shared_prefix_requests_receive_disjoint_private_destinations() -> None:
+    manager = _manager(
+        num_blocks=16,
+        enable_caching=True,
+        compression_config=_config(),
+    )
+    warm = _running_request("warm")
+    warm_blocks = manager.allocate_slots(
+        warm,
+        num_new_tokens=warm.num_prompt_tokens,
+        has_scheduled_reqs=False,
+    )
+    assert warm_blocks is not None
+    manager.free(warm)
+
+    requests = [_running_request("first"), _running_request("second")]
+    sources = []
+    destinations = []
+    for request in requests:
+        computed_blocks, num_computed_tokens = manager.get_computed_blocks(request)
+        assert num_computed_tokens == 256
+        new_blocks = manager.allocate_slots(
+            request,
+            num_new_tokens=request.num_prompt_tokens - num_computed_tokens,
+            num_new_computed_tokens=num_computed_tokens,
+            new_computed_blocks=computed_blocks,
+            reserved_blocks=manager.get_num_compression_destination_blocks(request),
+            has_scheduled_reqs=False,
+        )
+        assert new_blocks is not None
+        manager.reserve_compression_destination(request)
+        sources.append(manager.get_block_ids(request.request_id)[0])
+        destination = manager.get_compression_destination_block_ids(request.request_id)
+        assert destination is not None
+        destinations.append(destination[0])
+
+    shared_source_ids = (
+        set(sources[0])
+        .intersection(sources[1])
+        .difference({manager.block_pool.null_block.block_id})
+    )
+    assert shared_source_ids
+    assert set(sources[0]).isdisjoint(destinations[0])
+    assert set(sources[1]).isdisjoint(destinations[1])
+    assert set(destinations[0]).isdisjoint(destinations[1])
+    for block_id in shared_source_ids:
+        assert manager.block_pool.blocks[block_id].ref_cnt == 2
+
+    for request in requests:
+        manager.free(request)
 
 
 def test_partial_prefill_plan_is_rejected_and_final_boundary_is_accepted() -> None:
@@ -315,8 +516,8 @@ def test_partial_prefill_plan_is_rejected_and_final_boundary_is_accepted() -> No
     assert manager.get_block_ids(request.request_id) == ([*block_ids],)
     assert manager.block_pool.get_num_free_blocks() == free_before
     request.num_computed_tokens = request.num_prompt_tokens
-    released = manager.apply_compression_plan(request, _plan(request, block_ids))
-    assert released == (block_ids[-1],)
+    commit = manager.apply_compression_plan(request, _plan(request, block_ids))
+    assert commit.released_block_ids == (block_ids[-1],)
 
 
 def test_commit_ack_is_not_visible_until_plan_commit_and_next_schedule() -> None:
@@ -327,7 +528,7 @@ def test_commit_ack_is_not_visible_until_plan_commit_and_next_schedule() -> None
         requests={request.request_id: request},
         kv_cache_manager=SimpleNamespace(
             validate_compression_plan=lambda actual_request, actual_plan: 2,
-            apply_compression_plan=lambda actual_request, actual_plan: (2,),
+            apply_compression_plan=lambda actual_request, actual_plan: _commit_result(),
             get_block_ids=lambda request_id: ([0, 1],),
         ),
     )
@@ -406,11 +607,9 @@ def test_invalid_plan_is_rejected_before_commit(plan_update, error_match) -> Non
     assert manager.get_compressed_physical_num_tokens(request.request_id) is None
 
 
-def test_disabled_prefix_cache_transfer_and_wrong_block_size_are_rejected() -> None:
+def test_disabled_transfer_and_wrong_block_size_are_rejected() -> None:
     cases = [
         (_manager(), None, "feature is disabled"),
-        (_manager(enable_caching=True, compression_config=_config()), None, "prefix"),
-        (_manager(block_size=64, compression_config=_config()), None, "block_size"),
         (_manager(compression_config=_config()), {}, "KV transfer"),
     ]
     for index, (manager, kv_transfer_params, error_match) in enumerate(cases):
@@ -422,6 +621,9 @@ def test_disabled_prefix_cache_transfer_and_wrong_block_size_are_rejected() -> N
         with pytest.raises(KVCacheCompressionError, match=error_match):
             manager.apply_compression_plan(request, _plan(request, (1, 2, 3)))
         assert manager.block_pool.get_num_free_blocks() == free_before
+
+    with pytest.raises(KVCacheCompressionError, match="block_size"):
+        _manager(block_size=64, compression_config=_config())
 
 
 def test_repeated_plan_and_unsupported_decode_modes_are_rejected() -> None:
@@ -476,7 +678,7 @@ def test_scheduler_commits_plans_and_rejects_them_when_disabled() -> None:
                 validations.append((actual_request, actual_plan)) or 2
             ),
             apply_compression_plan=lambda actual_request, actual_plan: (
-                calls.append((actual_request, actual_plan)) or (2,)
+                calls.append((actual_request, actual_plan)) or _commit_result()
             ),
         ),
     )
@@ -534,3 +736,6 @@ def test_output_contracts_are_none_on_default_path() -> None:
         is None
     )
     assert SchedulerOutput.make_empty().kv_cache_compression_block_table_updates is None
+    assert (
+        SchedulerOutput.make_empty().kv_cache_compression_destination_block_ids is None
+    )
