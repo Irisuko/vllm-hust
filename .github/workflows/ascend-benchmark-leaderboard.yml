@@ -1319,7 +1319,7 @@ jobs:
           PERFGATE_SPEC_FILE: ${{ vars.VLLM_HUST_PERFGATE_SPEC_FILE || '' }}
           PERFGATE_WARMUP_RUNS: "1"
           PERFGATE_MEASURED_RUNS: "3"
-          PERFGATE_AGGREGATION: "median"
+          PERFGATE_AGGREGATION: "primary-median-run"
           PUBLISH_TO_BENCHMARK_REPO: "0"
           PUBLISH_TO_HF: "0"
         run: |
@@ -1398,7 +1398,9 @@ jobs:
           PERFGATE_TARGET_GIT_REPOSITORY: ${{ github.workspace }}
           PERFGATE_EXPECTED_WARMUP_RUNS: "1"
           PERFGATE_EXPECTED_MEASURED_RUNS: "3"
-          PERFGATE_EXPECTED_AGGREGATION: "median"
+          PERFGATE_EXPECTED_SCHEMA_VERSION: "perfgate-measurement/v2"
+          PERFGATE_EXPECTED_STRATEGY: "warmup+primary-median-run"
+          PERFGATE_EXPECTED_AGGREGATION: "primary-median-run"
         run: |
           set -euo pipefail
           bash .github/workflows/scripts/perfgate_store_baseline.sh

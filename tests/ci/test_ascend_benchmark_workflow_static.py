@@ -643,7 +643,7 @@ def test_producer_sets_perfgate_measurement_knobs():
     ]
     assert 'PERFGATE_WARMUP_RUNS: "1"' in producer_block
     assert 'PERFGATE_MEASURED_RUNS: "3"' in producer_block
-    assert 'PERFGATE_AGGREGATION: "median"' in producer_block
+    assert 'PERFGATE_AGGREGATION: "primary-median-run"' in producer_block
     assert (
         "RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-"
         "${{ env.TARGET_REPO_SHA }}-perfgate" in producer_block
@@ -660,7 +660,30 @@ def test_store_baseline_step_expects_measurement_policy():
 
     assert 'PERFGATE_EXPECTED_WARMUP_RUNS: "1"' in store_block
     assert 'PERFGATE_EXPECTED_MEASURED_RUNS: "3"' in store_block
-    assert 'PERFGATE_EXPECTED_AGGREGATION: "median"' in store_block
+    assert 'PERFGATE_EXPECTED_SCHEMA_VERSION: "perfgate-measurement/v2"' in store_block
+    assert 'PERFGATE_EXPECTED_STRATEGY: "warmup+primary-median-run"' in store_block
+    assert 'PERFGATE_EXPECTED_AGGREGATION: "primary-median-run"' in store_block
+
+
+def test_pr_stage1_and_stage2_keep_single_run_measurement_defaults():
+    text = workflow_text()
+
+    formal_step = text.index("- name: Run benchmark CI and optional formal publish")
+    stage1_step = text.index("- name: Performance gate - Stage 1 comparison")
+    stage2_step = text.index(
+        "- name: Performance gate - Stage 2 trial rebase and benchmark"
+    )
+    final_compare_step = text.index(
+        "- name: Performance gate - two-stage comparison", stage2_step
+    )
+
+    for block in (
+        text[formal_step:stage1_step],
+        text[stage2_step:final_compare_step],
+    ):
+        assert "PERFGATE_WARMUP_RUNS:" not in block
+        assert "PERFGATE_MEASURED_RUNS:" not in block
+        assert "PERFGATE_AGGREGATION:" not in block
 
 
 def test_runner_script_forwards_perfgate_measurement_env():
@@ -675,7 +698,10 @@ def test_runner_script_forwards_perfgate_measurement_env():
 
     assert text.count('PERFGATE_WARMUP_RUNS="${PERFGATE_WARMUP_RUNS:-0}"') >= 2
     assert text.count('PERFGATE_MEASURED_RUNS="${PERFGATE_MEASURED_RUNS:-1}"') >= 2
-    assert text.count('PERFGATE_AGGREGATION="${PERFGATE_AGGREGATION:-median}"') >= 2
+    assert (
+        text.count('PERFGATE_AGGREGATION="${PERFGATE_AGGREGATION:-primary-median-run}"')
+        >= 2
+    )
 
 
 def test_runner_script_copies_measurement_json_fail_closed():
@@ -698,6 +724,9 @@ def test_store_baseline_script_uses_central_exact_protocol_and_askpass():
     assert '--target-repository "$TARGET_REPOSITORY"' in text
     assert '--spec-hash "$SPEC_HASH"' in text
     assert '--benchmark-runner-sha "$BENCHMARK_RUNNER_SHA"' in text
+    assert "perfgate-measurement/v2" in text
+    assert "warmup+primary-median-run" in text
+    assert 'secondary_sort_key == "run_index"' in text
     assert "UPDATE_POINTER=(--update-latest-pointer)" in text
     assert "GIT_ASKPASS" in text
     assert "GIT_TERMINAL_PROMPT=0" in text

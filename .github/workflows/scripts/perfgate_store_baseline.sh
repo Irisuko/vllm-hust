@@ -14,7 +14,9 @@ MEASUREMENT_FILE=${PERFGATE_MEASUREMENT_FILE:-$(dirname "$BASELINE_FILE")/measur
 PROVENANCE_FILE=${PERFGATE_PROVENANCE_FILE:-$(dirname "$BASELINE_FILE")/perfgate-provenance.json}
 EXPECTED_WARMUP_RUNS=${PERFGATE_EXPECTED_WARMUP_RUNS:-1}
 EXPECTED_MEASURED_RUNS=${PERFGATE_EXPECTED_MEASURED_RUNS:-3}
-EXPECTED_AGGREGATION=${PERFGATE_EXPECTED_AGGREGATION:-median}
+EXPECTED_SCHEMA_VERSION=${PERFGATE_EXPECTED_SCHEMA_VERSION:-perfgate-measurement/v2}
+EXPECTED_STRATEGY=${PERFGATE_EXPECTED_STRATEGY:-warmup+primary-median-run}
+EXPECTED_AGGREGATION=${PERFGATE_EXPECTED_AGGREGATION:-primary-median-run}
 WRITER_TOKEN=${PERFGATE_BASELINE_WRITER_TOKEN:-}
 
 for tool in git jq awk mktemp sha256sum; do
@@ -42,12 +44,22 @@ fi
 jq -e \
   --argjson warmup "$EXPECTED_WARMUP_RUNS" \
   --argjson measured "$EXPECTED_MEASURED_RUNS" \
+  --arg schema "$EXPECTED_SCHEMA_VERSION" \
+  --arg strategy "$EXPECTED_STRATEGY" \
   --arg aggregation "$EXPECTED_AGGREGATION" \
-  '.strategy == "warmup+median" and
+  '.schema_version == $schema and
+   .strategy == $strategy and
    .warmup_runs == $warmup and
    .measured_runs == $measured and
    .aggregation == $aggregation and
-   (.per_run | type == "array" and length == $measured)' \
+   (.warmup | type == "array" and length == $warmup) and
+   (.per_run | type == "array" and length == $measured) and
+   (.selection | type == "object") and
+   .selection.primary_metric == "throughput_tps" and
+   .selection.sort_direction == "ascending" and
+   .selection.secondary_sort_key == "run_index" and
+   (.selection.ordered_run_indices | type == "array" and length == $measured) and
+   .selection.selected_position == (($measured + 1) / 2)' \
   "$MEASUREMENT_FILE" >/dev/null
 
 verify_raw_result_evidence() {

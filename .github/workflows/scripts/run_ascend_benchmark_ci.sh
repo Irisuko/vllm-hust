@@ -1107,7 +1107,7 @@ PY
         CONSTRAINTS_FILE="$SAME_SPEC_CONSTRAINTS_FILE" \
         PERFGATE_WARMUP_RUNS="${PERFGATE_WARMUP_RUNS:-0}" \
         PERFGATE_MEASURED_RUNS="${PERFGATE_MEASURED_RUNS:-1}" \
-        PERFGATE_AGGREGATION="${PERFGATE_AGGREGATION:-median}" \
+        PERFGATE_AGGREGATION="${PERFGATE_AGGREGATION:-primary-median-run}" \
         run_with_same_spec_stderr_filter run_ascend_root_helper same-spec "$same_spec_runner" "$effective_same_spec_file"
     else
       run_with_same_spec_stderr_filter env \
@@ -1136,7 +1136,7 @@ PY
         CONSTRAINTS_FILE="$SAME_SPEC_CONSTRAINTS_FILE" \
         PERFGATE_WARMUP_RUNS="${PERFGATE_WARMUP_RUNS:-0}" \
         PERFGATE_MEASURED_RUNS="${PERFGATE_MEASURED_RUNS:-1}" \
-        PERFGATE_AGGREGATION="${PERFGATE_AGGREGATION:-median}" \
+        PERFGATE_AGGREGATION="${PERFGATE_AGGREGATION:-primary-median-run}" \
         bash "$same_spec_runner" "$effective_same_spec_file"
     fi
   }
