@@ -6,6 +6,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
     / ".github/workflows/scripts/sync_benchmark_snapshots_to_github.sh"
@@ -146,7 +148,22 @@ def test_sync_benchmark_snapshots_verifies_published_commit(tmp_path):
     assert "GITHUB_SNAPSHOT_SYNC_SNAPSHOT_PATH=leaderboard-data/snapshots" in env_text
 
 
-def test_invalid_snapshot_does_not_change_benchmark_remote(tmp_path):
+@pytest.mark.parametrize(
+    ("validator_environment", "failure_message"),
+    [
+        (
+            "FAKE_PUBLIC_VALIDATOR_EXIT",
+            "publication admission failed at public snapshot validation",
+        ),
+        (
+            "FAKE_TREND_VALIDATOR_EXIT",
+            "publication admission failed at trend validation",
+        ),
+    ],
+)
+def test_invalid_snapshot_does_not_change_benchmark_remote(
+    tmp_path, validator_environment, failure_message
+):
     remote, _seed = init_bare_remote(tmp_path)
     benchmark_repo = tmp_path / "benchmark"
     website_repo = tmp_path / "website"
@@ -180,7 +197,6 @@ def test_invalid_snapshot_does_not_change_benchmark_remote(tmp_path):
             "BENCHMARK_REPO_REMOTE": "origin",
             "BENCHMARK_REPO_SLUG": "local/benchmark",
             "CURRENT_SUBMISSION_DIR": str(submission),
-            "FAKE_PUBLIC_VALIDATOR_EXIT": "2",
             "GITHUB_ENV": str(github_env),
             "PYTHON_BIN": str(fake_python),
             "RUN_ID": "invalid-ci-test",
@@ -189,6 +205,7 @@ def test_invalid_snapshot_does_not_change_benchmark_remote(tmp_path):
             "WEBSITE_REPO_DIR": str(website_repo),
         }
     )
+    env[validator_environment] = "2"
 
     result = subprocess.run(
         ["bash", str(SCRIPT_PATH)],
@@ -200,7 +217,7 @@ def test_invalid_snapshot_does_not_change_benchmark_remote(tmp_path):
     )
 
     assert result.returncode == 2, result.stdout + result.stderr
-    assert "publication admission failed at public snapshot validation" in result.stderr
+    assert failure_message in result.stderr
     assert run(
         ["git", "--git-dir", str(remote), "rev-parse", "main"], tmp_path
     ).stdout.strip() == remote_head
