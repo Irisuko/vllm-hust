@@ -101,6 +101,8 @@ staged_submission_dir="$publication_staging_dir/submissions"
 staged_snapshot_dir="$publication_staging_dir/snapshots"
 
 cleanup_publication_staging() {
+  # Invoked indirectly by the EXIT trap below.
+  # shellcheck disable=SC2317
   rm -rf "$publication_staging_dir"
 }
 trap cleanup_publication_staging EXIT
