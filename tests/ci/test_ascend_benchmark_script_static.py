@@ -40,6 +40,16 @@ def test_benchmark_snapshot_sync_explains_missing_write_credentials():
     assert "VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY" in text
     assert "VLLM_HUST_BENCHMARK_GH_TOKEN" in text
     assert "Benchmark repo publish target:" in text
+    staging_index = text.index("publication_staging_dir=$(mktemp -d")
+    public_validator_index = text.index("validate_public_leaderboard_snapshots.py")
+    trend_validator_index = text.index("validate-trend --input")
+    git_add_index = text.index('git -C "$BENCHMARK_REPO_DIR" add')
+    git_commit_index = text.index('git -C "$BENCHMARK_REPO_DIR" commit')
+    git_push_index = text.index('git -C "$BENCHMARK_REPO_DIR" push')
+    assert staging_index < public_validator_index < trend_validator_index
+    assert trend_validator_index < git_add_index
+    assert git_add_index < git_commit_index < git_push_index
+    assert 'write_github_env GITHUB_SNAPSHOT_SYNC_STATUS rejected' in text
 
 
 def test_same_spec_benchmark_failure_prints_server_log_tail():
