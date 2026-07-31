@@ -49,7 +49,7 @@ def test_benchmark_snapshot_sync_explains_missing_write_credentials():
     assert staging_index < public_validator_index < trend_validator_index
     assert trend_validator_index < git_add_index
     assert git_add_index < git_commit_index < git_push_index
-    assert 'write_github_env GITHUB_SNAPSHOT_SYNC_STATUS rejected' in text
+    assert "write_github_env GITHUB_SNAPSHOT_SYNC_STATUS rejected" in text
 
 
 def test_same_spec_benchmark_failure_prints_server_log_tail():

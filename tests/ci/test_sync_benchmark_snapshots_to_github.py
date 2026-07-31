@@ -218,9 +218,12 @@ def test_invalid_snapshot_does_not_change_benchmark_remote(
 
     assert result.returncode == 2, result.stdout + result.stderr
     assert failure_message in result.stderr
-    assert run(
-        ["git", "--git-dir", str(remote), "rev-parse", "main"], tmp_path
-    ).stdout.strip() == remote_head
+    assert (
+        run(
+            ["git", "--git-dir", str(remote), "rev-parse", "main"], tmp_path
+        ).stdout.strip()
+        == remote_head
+    )
     assert not (benchmark_repo / "submissions" / "invalid-ci-test").exists()
     assert not (benchmark_repo / "leaderboard-data" / "snapshots").exists()
     assert "GITHUB_SNAPSHOT_SYNC_STATUS=rejected" in github_env.read_text(
