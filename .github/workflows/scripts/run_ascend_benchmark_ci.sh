@@ -1462,6 +1462,8 @@ PY
     --submissions-dir "$SUBMISSIONS_ROOT"
 fi
 
+printf 'OK\n' > "$SUBMISSION_DIR/STATUS"
+
 if [[ "$PUBLISH_TO_BENCHMARK_REPO" == "1" ]]; then
   sync_benchmark_publication_to_github
 else
