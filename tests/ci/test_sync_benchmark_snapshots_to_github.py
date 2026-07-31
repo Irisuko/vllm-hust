@@ -110,6 +110,7 @@ def test_sync_benchmark_snapshots_verifies_published_commit(tmp_path):
     submission.mkdir()
     (submission / "leaderboard_manifest.json").write_text("{}\n", encoding="utf-8")
     (submission / "run_leaderboard.json").write_text("{}\n", encoding="utf-8")
+    (submission / "STATUS").write_text("OK\n", encoding="utf-8")
 
     env = os.environ.copy()
     env.update(
@@ -146,6 +147,9 @@ def test_sync_benchmark_snapshots_verifies_published_commit(tmp_path):
     assert "GITHUB_SNAPSHOT_SYNC_VERIFIED_COMMIT=" in env_text
     assert "GITHUB_SNAPSHOT_SYNC_SUBMISSION_PATH=submissions/ci-test" in env_text
     assert "GITHUB_SNAPSHOT_SYNC_SNAPSHOT_PATH=leaderboard-data/snapshots" in env_text
+    assert (benchmark_repo / "submissions" / "ci-test" / "STATUS").read_text(
+        encoding="utf-8"
+    ) == "OK\n"
 
 
 @pytest.mark.parametrize(
@@ -185,6 +189,7 @@ def test_invalid_snapshot_does_not_change_benchmark_remote(
     submission.mkdir()
     (submission / "leaderboard_manifest.json").write_text("{}\n", encoding="utf-8")
     (submission / "run_leaderboard.json").write_text("{}\n", encoding="utf-8")
+    (submission / "STATUS").write_text("OK\n", encoding="utf-8")
     remote_head = run(
         ["git", "--git-dir", str(remote), "rev-parse", "main"], tmp_path
     ).stdout.strip()

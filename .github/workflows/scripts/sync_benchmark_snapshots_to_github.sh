@@ -19,7 +19,7 @@ BENCHMARK_REPO_SLUG=${BENCHMARK_REPO_SLUG:-vLLM-HUST/vllm-hust-benchmark}
 BENCHMARK_REPO_GH_TOKEN=${BENCHMARK_REPO_GH_TOKEN:-}
 BENCHMARK_REPO_SSH_KEY=${BENCHMARK_REPO_SSH_KEY:-}
 
-required_submission_files=(leaderboard_manifest.json run_leaderboard.json)
+required_submission_files=(leaderboard_manifest.json run_leaderboard.json STATUS)
 required_snapshot_files=(
   leaderboard_single.json
   leaderboard_multi.json
@@ -107,6 +107,11 @@ cleanup_publication_staging() {
 }
 trap cleanup_publication_staging EXIT
 
+reset_publication_staging() {
+  rm -rf "$publication_staging_dir" || return $?
+  mkdir -p "$publication_staging_dir" || return $?
+}
+
 git -C "$BENCHMARK_REPO_DIR" config user.name "$GIT_COMMITTER_NAME"
 git -C "$BENCHMARK_REPO_DIR" config user.email "$GIT_COMMITTER_EMAIL"
 configure_push_remote
@@ -116,6 +121,7 @@ export VLLM_HUST_WEBSITE_REPO="$WEBSITE_REPO_DIR"
 export VLLM_HUST_REPO="$VLLM_HUST_REPO_DIR"
 
 prepare_publication_commit() {
+  reset_publication_staging || return $?
   git -C "$BENCHMARK_REPO_DIR" fetch "$BENCHMARK_REPO_REMOTE" "$SNAPSHOT_TARGET_BRANCH" || return $?
   git -C "$BENCHMARK_REPO_DIR" checkout -B "$SNAPSHOT_TARGET_BRANCH" "$BENCHMARK_REPO_REMOTE/$SNAPSHOT_TARGET_BRANCH" || return $?
 
