@@ -23,12 +23,12 @@ def test_run_ascend_benchmark_propagates_benchmark_repo_publish_env():
     assert 'BENCHMARK_REPO_SSH_KEY="${BENCHMARK_REPO_SSH_KEY:-}" \\' in text
 
 
-def test_perfgate_store_baseline_cleans_worktree_on_exit():
+def test_perfgate_store_baseline_cleans_scoped_writer_credentials_on_exit():
     text = script_text("perfgate_store_baseline.sh")
 
     assert "cleanup() {" in text
-    assert 'git worktree remove "$WORKTREE_DIR" --force' in text
-    assert 'rm -rf "$WORKTREE_DIR"' in text
+    assert "unset PERFGATE_BASELINE_WRITER_TOKEN WRITER_TOKEN" in text
+    assert 'rm -rf "$ASKPASS_DIR"' in text
     assert "trap cleanup EXIT" in text
 
 
