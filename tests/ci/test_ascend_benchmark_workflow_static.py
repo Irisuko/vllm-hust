@@ -743,6 +743,19 @@ def test_store_baseline_script_uses_central_exact_protocol_and_askpass():
     assert "latest-main-pointer.json" not in text
 
 
+def test_trusted_main_benchmark_runner_supports_runtime_manager_provenance() -> None:
+    workflow = workflow_text()
+    check_start = workflow.index("- name: Verify trusted main dependency SHAs")
+    check_end = workflow.index(
+        "- name: Prepare Hugging Face cache directories", check_start
+    )
+    dependency_check = workflow[check_start:check_end]
+
+    assert "perfgate_baselines publish --help" in dependency_check
+    assert "--runtime-manager-sha" in dependency_check
+    assert "Pinned benchmark runner does not support" in dependency_check
+
+
 def test_perfgate_producer_and_store_survive_formal_benchmark_failure():
     text = workflow_text()
 
