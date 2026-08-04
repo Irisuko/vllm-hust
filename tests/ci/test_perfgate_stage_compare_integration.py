@@ -271,7 +271,7 @@ if [[ "$1" == "fetch" ]]; then exit 0; fi
 if [[ "$1" == "rebase" ]]; then exit 0; fi
 if [[ "$1" == "checkout" ]]; then exit 0; fi
 if [[ "$1" == "branch" && "${2:-}" == "-D" ]]; then exit 0; fi
-if [[ "$1" == "rev-parse" && "${2:-}" == "HEAD" ]]; then
+if [[ "$1" == "rev-parse" && "${2:-}" == "HEAD" && -n "${TEST_TARGET_SHA:-}" ]]; then
   printf '%s\n' "$TEST_TARGET_SHA"
   exit 0
 fi
@@ -381,6 +381,7 @@ def test_stage2_artifact_finalize_and_admission_contract(
         "PERFGATE_STAGE2_RUN_ID": "stage2-run",
         "PERFGATE_STAGE2_RESULT_ROOT": str(tmp_path / "stage2-results"),
         "FORK_POINT": "0" * 40,
+        "TEST_TARGET_SHA": target_sha,
         "STAGE2_ARTIFACT_MUTATION": mutation or "",
         "BENCHMARK_FINALIZER_SCRIPT": str(finalizer),
         "BENCHMARK_VALIDATOR_SCRIPT": str(validator),
