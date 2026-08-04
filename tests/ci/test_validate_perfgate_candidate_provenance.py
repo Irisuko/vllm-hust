@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ SCRIPT = (
 TARGET_SHA = "1" * 40
 
 
-def write_json(path: Path, payload: dict[str, object]) -> None:
+def write_json(path: Path, payload: Mapping[str, object]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
