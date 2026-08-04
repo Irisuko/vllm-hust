@@ -4,7 +4,6 @@ set -euo pipefail
 RUN_ID=${RUN_ID:-ci-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_SHA:-local}}
 RESULT_ROOT=${RESULT_ROOT:-${GITHUB_WORKSPACE:-$PWD}/.benchmarks/ci/$RUN_ID}
 GITHUB_ENV=${GITHUB_ENV:-/dev/null}
-MODE=${PERFGATE_MODE:-report}
 REPORT_FILE=${PERFGATE_REPORT_FILE:-$RESULT_ROOT/perfgate_report.md}
 STAGE1_CURRENT=${PERFGATE_STAGE1_CURRENT_FILE:-$RESULT_ROOT/submissions/$RUN_ID/run_leaderboard.json}
 STAGE1_PROVENANCE=${PERFGATE_STAGE1_PROVENANCE_FILE:-$RESULT_ROOT/submissions/$RUN_ID/perfgate-provenance.json}

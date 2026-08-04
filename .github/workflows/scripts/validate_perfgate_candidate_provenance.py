@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 MATCHED_FIELDS = (
@@ -63,9 +64,7 @@ def validate(
             not SHA_PATTERN.fullmatch(expected.lower())
             or not SHA_PATTERN.fullmatch(actual.lower())
         ):
-            mismatches.append(
-                f"{field}: baseline={expected!r}, candidate={actual!r}"
-            )
+            mismatches.append(f"{field}: baseline={expected!r}, candidate={actual!r}")
             continue
         if expected != actual:
             mismatches.append(f"{field}: baseline={expected!r}, candidate={actual!r}")
