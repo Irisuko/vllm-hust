@@ -151,16 +151,22 @@ def test_stage1_matching_provenance_runs_comparison(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "fixture_kwargs",
+    ("candidate_overrides", "metadata"),
     [
-        {"candidate_overrides": {"runtime_manager_sha": "not-a-sha"}},
-        {"metadata": False},
+        ({"runtime_manager_sha": "not-a-sha"}, True),
+        (None, False),
     ],
 )
 def test_stage1_provenance_failure_skips_comparison(
-    tmp_path: Path, fixture_kwargs: dict[str, object]
+    tmp_path: Path,
+    candidate_overrides: dict[str, str] | None,
+    metadata: bool,
 ) -> None:
-    env, env_file = stage1_fixture(tmp_path, **fixture_kwargs)
+    env, env_file = stage1_fixture(
+        tmp_path,
+        metadata=metadata,
+        candidate_overrides=candidate_overrides,
+    )
     result = run_script(STAGE1_SCRIPT, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -230,8 +236,16 @@ def make_stage2_git_stub(path: Path) -> None:
         """#!/bin/bash
 set -euo pipefail
 if [[ "$1" == "fetch" ]]; then exit 0; fi
+if [[ "$1" == "rebase" ]]; then exit 0; fi
+if [[ "$1" == "checkout" ]]; then exit 0; fi
+if [[ "$1" == "branch" && "${2:-}" == "-D" ]]; then exit 0; fi
+if [[ "$1" == "rev-parse" && "${2:-}" == "HEAD" ]]; then
+  printf '%s\n' "$TEST_TARGET_SHA"
+  exit 0
+fi
 if [[ "$1" == "rev-parse" && "${2:-}" == "origin/main" ]]; then
-  exec /usr/bin/git rev-parse HEAD
+  printf '%s\n' "$TEST_TARGET_SHA"
+  exit 0
 fi
 exec /usr/bin/git "$@"
 """,
@@ -274,6 +288,7 @@ def test_stage2_provenance_match_or_mismatch_is_recorded(
         "PERFGATE_STAGE2_RUN_ID": "stage2-run",
         "PERFGATE_STAGE2_RESULT_ROOT": str(tmp_path / "stage2-results"),
         "FORK_POINT": "0" * 40,
+        "TEST_TARGET_SHA": target_sha,
         "PYTHON_BIN": "",
         "NODE_ENV_RETRY_MAX_ATTEMPTS": "1",
         "GIT_TERMINAL_PROMPT": "0",
