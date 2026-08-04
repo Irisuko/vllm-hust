@@ -238,14 +238,18 @@ JSON
       ;;
   esac
   /bin/bash "$BENCHMARK_VALIDATOR_SCRIPT" "$destination"
-  required_files=(run_leaderboard.json leaderboard_manifest.json env-manifest.json)
-  for required_file in "${{required_files[@]}}"; do
-    if ! grep -Eq "[[:space:]]\\./?$required_file$" \
-      "$destination/checksums.sha256"; then
-      echo "CHECKSUM_INCOMPLETE: missing $required_file" >&2
-      exit 1
-    fi
-  done
+  PYTHONPATH="$BENCHMARK_REPO_ROOT/src${{PYTHONPATH:+:$PYTHONPATH}}" \
+    "$BENCHMARK_ADMISSION_PYTHON" - "$destination" <<'PY'
+import sys
+from pathlib import Path
+
+from vllm_hust_benchmark.integration import _scan_submission_admission_failures
+
+failures = _scan_submission_admission_failures(Path(sys.argv[1]).parent)
+if failures:
+    print(f"publication admission failed: {{failures}}", file=sys.stderr)
+    raise SystemExit(1)
+PY
   exit 0
 fi
 if [[ "$script" == *.github/workflows/scripts/perfgate_fetch_baseline.sh ]]; then
@@ -284,12 +288,13 @@ exec /usr/bin/git "$@"
     )
 
 
-def artifact_scripts() -> tuple[Path, Path]:
+def artifact_scripts() -> tuple[Path, Path, Path]:
     benchmark_repo = os.environ.get(
-        "VLLM_HUST_BENCHMARK_REPO", str(REPO_ROOT.parent / "vllm-hust-benchmark")
+        "VLLM_HUST_BENCHMARK_REPO", str(REPO_ROOT / "vllm-hust-benchmark")
     )
     root = Path(benchmark_repo)
     return (
+        root,
         root / "scripts/collect-run-artifact.sh",
         root / "scripts/validate-run-artifact.sh",
     )
@@ -351,7 +356,7 @@ def test_stage2_artifact_finalize_and_admission_contract(
     tmp_path: Path, mutation: str | None
 ) -> None:
     """Evidence must be finalized before the Stage 2 admission decision."""
-    finalizer, validator = artifact_scripts()
+    benchmark_repo, finalizer, validator = artifact_scripts()
     if not finalizer.is_file() or not validator.is_file():
         pytest.fail("benchmark artifact finalizer and validator must exist")
 
@@ -385,6 +390,8 @@ def test_stage2_artifact_finalize_and_admission_contract(
         "STAGE2_ARTIFACT_MUTATION": mutation or "",
         "BENCHMARK_FINALIZER_SCRIPT": str(finalizer),
         "BENCHMARK_VALIDATOR_SCRIPT": str(validator),
+        "BENCHMARK_REPO_ROOT": str(Path(benchmark_repo)),
+        "BENCHMARK_ADMISSION_PYTHON": sys.executable,
         "CURRENT_RUNTIME_PYTHON": sys.executable,
         "PYTHON_BIN": "",
         "NODE_ENV_RETRY_MAX_ATTEMPTS": "1",
