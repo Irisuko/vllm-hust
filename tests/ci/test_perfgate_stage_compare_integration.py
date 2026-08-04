@@ -213,7 +213,39 @@ if [[ "$script" == *.github/workflows/scripts/run_ascend_benchmark_ci.sh ]]; the
   destination="$RESULT_ROOT/submissions/$RUN_ID"
   mkdir -p "$destination"
   cp "{candidate}" "$destination/perfgate-provenance.json"
-  printf '{{}}\\n' > "$destination/run_leaderboard.json"
+  if [[ -z "${{BENCHMARK_FINALIZER_SCRIPT:-}}" ]]; then
+    printf '{{}}\\n' > "$destination/run_leaderboard.json"
+    exit 0
+  fi
+  cat > "$destination/run_leaderboard.json" <<'JSON'
+{{"entry_id":"stage2-fixture","engine":"vllm-hust","engine_version":"test","config_type":"single_gpu","hardware":{{"chip_model":"910B2","chip_count":1}},"model":{{"canonical_id":"hf:Qwen/Qwen2.5-14B-Instruct","precision":"FP16"}},"workload":{{"name":"random-online"}},"metadata":{{"submitted_at":"2026-08-01T00:00:00Z"}}}}
+JSON
+  cat > "$destination/leaderboard_manifest.json" <<'JSON'
+{{"schema_version":"leaderboard-export-manifest/v2","generated_at":"2026-08-01T00:00:00Z","entries":[{{"leaderboard_artifact":"run_leaderboard.json"}}]}}
+JSON
+  /bin/bash "$BENCHMARK_FINALIZER_SCRIPT" "$destination"
+  case "${{STAGE2_ARTIFACT_MUTATION:-}}" in
+    missing-manifest)
+      rm "$destination/leaderboard_manifest.json"
+      ;;
+    missing-checksum-entry)
+      grep -v 'env-manifest.json' "$destination/checksums.sha256" \
+        > "$destination/checksums.sha256.tmp"
+      mv "$destination/checksums.sha256.tmp" "$destination/checksums.sha256"
+      ;;
+    tamper)
+      printf '%s\\n' '{{"tampered":true}}' > "$destination/run_leaderboard.json"
+      ;;
+  esac
+  /bin/bash "$BENCHMARK_VALIDATOR_SCRIPT" "$destination"
+  required_files=(run_leaderboard.json leaderboard_manifest.json env-manifest.json)
+  for required_file in "${{required_files[@]}}"; do
+    if ! grep -Eq "[[:space:]]\\./?$required_file$" \
+      "$destination/checksums.sha256"; then
+      echo "CHECKSUM_INCOMPLETE: missing $required_file" >&2
+      exit 1
+    fi
+  done
   exit 0
 fi
 if [[ "$script" == *.github/workflows/scripts/perfgate_fetch_baseline.sh ]]; then
@@ -249,6 +281,17 @@ if [[ "$1" == "rev-parse" && "${2:-}" == "origin/main" ]]; then
 fi
 exec /usr/bin/git "$@"
 """,
+    )
+
+
+def artifact_scripts() -> tuple[Path, Path]:
+    benchmark_repo = os.environ.get("VLLM_HUST_BENCHMARK_REPO")
+    if not benchmark_repo:
+        pytest.fail("VLLM_HUST_BENCHMARK_REPO is required for artifact contract tests")
+    root = Path(benchmark_repo)
+    return (
+        root / "scripts/collect-run-artifact.sh",
+        root / "scripts/validate-run-artifact.sh",
     )
 
 
@@ -299,3 +342,59 @@ def test_stage2_provenance_match_or_mismatch_is_recorded(
     assert env_value(env_file, "PERFGATE_STAGE2_PROVENANCE_VALID") == (
         "0" if mismatch else "1"
     )
+
+
+@pytest.mark.parametrize(
+    "mutation", [None, "missing-manifest", "missing-checksum-entry", "tamper"]
+)
+def test_stage2_artifact_finalize_and_admission_contract(
+    tmp_path: Path, mutation: str | None
+) -> None:
+    """Evidence must be finalized before the Stage 2 admission decision."""
+    finalizer, validator = artifact_scripts()
+    if not finalizer.is_file() or not validator.is_file():
+        pytest.fail("benchmark artifact finalizer and validator must exist")
+
+    target_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
+    ).strip()
+    metadata = tmp_path / "baseline-metadata.json"
+    write_json(metadata, {"provenance": baseline_provenance()})
+    candidate = tmp_path / "candidate.json"
+    write_json(candidate, candidate_provenance(vllm_hust_sha=target_sha))
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    make_stage2_bash_stub(fake_bin / "bash", candidate, metadata)
+    make_stage2_git_stub(fake_bin / "git")
+    write_executable(
+        fake_bin / "python",
+        f'#!/bin/bash\nexec {sys.executable} "$@"\n',
+    )
+    env_file = tmp_path / "github-env"
+    env_file.touch()
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "GITHUB_ENV": str(env_file),
+        "GITHUB_WORKSPACE": str(REPO_ROOT),
+        "RUN_ID": "run",
+        "PERFGATE_STAGE2_RUN_ID": "stage2-run",
+        "PERFGATE_STAGE2_RESULT_ROOT": str(tmp_path / "stage2-results"),
+        "FORK_POINT": "0" * 40,
+        "STAGE2_ARTIFACT_MUTATION": mutation or "",
+        "BENCHMARK_FINALIZER_SCRIPT": str(finalizer),
+        "BENCHMARK_VALIDATOR_SCRIPT": str(validator),
+        "CURRENT_RUNTIME_PYTHON": sys.executable,
+        "PYTHON_BIN": "",
+        "NODE_ENV_RETRY_MAX_ATTEMPTS": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    result = run_script(STAGE2_SCRIPT, env)
+
+    if mutation is None:
+        assert result.returncode == 0, result.stdout + result.stderr
+        artifact = tmp_path / "stage2-results" / "submissions" / "stage2-run"
+        assert (artifact / "env-manifest.json").is_file()
+        assert (artifact / "checksums.sha256").is_file()
+    else:
+        assert result.returncode != 0, result.stdout + result.stderr

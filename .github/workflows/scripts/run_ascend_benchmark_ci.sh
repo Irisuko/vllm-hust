@@ -13,6 +13,7 @@ RAW_RESULT_FILE=${RAW_RESULT_FILE:-$RESULT_ROOT/raw_benchmark.json}
 SUBMISSIONS_ROOT=${SUBMISSIONS_ROOT:-$RESULT_ROOT/submissions}
 SUBMISSION_DIR=${SUBMISSION_DIR:-$SUBMISSIONS_ROOT/$RUN_ID}
 AGGREGATE_OUTPUT_DIR=${AGGREGATE_OUTPUT_DIR:-$RESULT_ROOT/leaderboard-data}
+ARTIFACT_FINALIZER_SCRIPT=${ARTIFACT_FINALIZER_SCRIPT:-$VLLM_HUST_BENCHMARK_REPO/scripts/collect-run-artifact.sh}
 BENCHMARK_PUBLICATION_SYNC_SCRIPT=${BENCHMARK_PUBLICATION_SYNC_SCRIPT:-$VLLM_HUST_REPO/.github/workflows/scripts/sync_benchmark_snapshots_to_github.sh}
 SERVER_LOG=${SERVER_LOG:-$RESULT_ROOT/server.log}
 RUNNER_PREFLIGHT_FAILURE_FILE=${RUNNER_PREFLIGHT_FAILURE_FILE:-$RESULT_ROOT/runner_preflight_failure.txt}
@@ -973,6 +974,18 @@ sync_benchmark_publication_to_github() {
     "$publisher_script"
 }
 
+finalize_submission_artifact() {
+  if [[ ! -f "$ARTIFACT_FINALIZER_SCRIPT" ]]; then
+    echo "benchmark artifact finalizer is missing: $ARTIFACT_FINALIZER_SCRIPT" >&2
+    return 2
+  fi
+
+  export CURRENT_VLLM_HUST_REPO=${CURRENT_VLLM_HUST_REPO:-$VLLM_HUST_REPO}
+  export CURRENT_VLLM_ASCEND_HUST_REPO=${CURRENT_VLLM_ASCEND_HUST_REPO:-$VLLM_ASCEND_HUST_REPO}
+  export CURRENT_RUNTIME_PYTHON=${CURRENT_RUNTIME_PYTHON:-$PYTHON_BIN}
+  bash "$ARTIFACT_FINALIZER_SCRIPT" "$SUBMISSION_DIR"
+}
+
 run_same_spec_current_benchmark() {
   local same_spec_runner=$VLLM_HUST_BENCHMARK_REPO/scripts/run-current-ascend-same-spec.sh
   local same_spec_raw_result=$RESULT_ROOT/raw_benchmark_result.json
@@ -1545,7 +1558,7 @@ PY
     --submissions-dir "$SUBMISSIONS_ROOT"
 fi
 
-printf 'OK\n' > "$SUBMISSION_DIR/STATUS"
+finalize_submission_artifact
 
 if [[ "$PUBLISH_TO_BENCHMARK_REPO" == "1" ]]; then
   sync_benchmark_publication_to_github
