@@ -285,9 +285,9 @@ exec /usr/bin/git "$@"
 
 
 def artifact_scripts() -> tuple[Path, Path]:
-    benchmark_repo = os.environ.get("VLLM_HUST_BENCHMARK_REPO")
-    if not benchmark_repo:
-        pytest.fail("VLLM_HUST_BENCHMARK_REPO is required for artifact contract tests")
+    benchmark_repo = os.environ.get(
+        "VLLM_HUST_BENCHMARK_REPO", str(REPO_ROOT.parent / "vllm-hust-benchmark")
+    )
     root = Path(benchmark_repo)
     return (
         root / "scripts/collect-run-artifact.sh",
