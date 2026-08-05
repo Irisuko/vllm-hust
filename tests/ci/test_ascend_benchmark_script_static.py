@@ -52,15 +52,18 @@ def test_benchmark_snapshot_sync_explains_missing_write_credentials():
     assert git_add_index < git_commit_index < git_push_index
     assert "write_github_env GITHUB_SNAPSHOT_SYNC_STATUS rejected" in text
     assert (
-        "required_submission_files=(leaderboard_manifest.json "
-        "run_leaderboard.json STATUS)" in text
+        "required_submission_files=(" in text
+        and "env-manifest.json" in text
+        and "checksums.sha256" in text
     )
     assert "reset_publication_staging()" in text
     assert "reset_publication_staging || return $?" in text
     submit_index = runner_text.index('"$PYTHON_BIN" -m vllm_hust_benchmark.cli submit')
-    status_index = runner_text.index("printf 'OK\\n' > \"$SUBMISSION_DIR/STATUS\"")
-    sync_index = runner_text.index("sync_benchmark_publication_to_github", status_index)
-    assert submit_index < status_index < sync_index
+    finalize_index = runner_text.index("\nfinalize_submission_artifact\n", submit_index)
+    sync_index = runner_text.index(
+        "sync_benchmark_publication_to_github", finalize_index
+    )
+    assert submit_index < finalize_index < sync_index
 
 
 def test_same_spec_benchmark_failure_prints_server_log_tail():
