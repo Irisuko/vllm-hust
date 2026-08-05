@@ -827,3 +827,38 @@ def test_perfgate_producer_and_store_survive_formal_benchmark_failure():
     )
     assert "  store-main-perfgate-baseline:" not in text
     assert text.count("secrets.VLLM_HUST_CENTRAL_BASELINE_WRITER_TOKEN") == 1
+
+
+def test_structured_diagnostics_cover_critical_operational_failures():
+    text = workflow_text()
+    diagnostics_start = text.index("- name: Build structured Nightly diagnostics")
+    diagnostics_end = text.index(
+        "- name: Upload benchmark artifacts", diagnostics_start
+    )
+    diagnostics_block = text[diagnostics_start:diagnostics_end]
+
+    critical_step_ids = (
+        "pre-clean-workspace",
+        "resolve-trusted-shas",
+        "configure-github-ssh",
+        "resolve-main-spec",
+        "checkout-website",
+        "preflight-root-helper",
+        "checkout-runtime-manager",
+        "verify-trusted-shas",
+        "prepare-hf-cache",
+        "acquire-hardware-lock",
+        "perfgate-producer",
+        "sanitize-before-baseline-publish",
+        "publish-central-baseline",
+        "cleanup-ascend-processes",
+        "release-hardware-lock",
+        "build-benchmark-summary",
+    )
+    for step_id in critical_step_ids:
+        assert f"id: {step_id}" in text
+        assert f'"id":"{step_id}"' in diagnostics_block
+        assert f"steps.{step_id}.outcome" in diagnostics_block
+        assert f"steps.{step_id}.outputs.exit_code" in diagnostics_block
+
+    assert "toJson(steps)" not in diagnostics_block
