@@ -294,6 +294,45 @@ def test_multi_scenario_runner_prints_failure_diagnostics():
     assert 'print_file_tail "runner preflight failure"' in text
 
 
+def test_structured_nightly_diagnostics_capture_steps_scenarios_and_four_states():
+    text = workflow_text()
+    diagnostics_step = text.index("      - name: Build structured Nightly diagnostics")
+    upload_step = text.index("      - name: Upload benchmark artifacts")
+    diagnostics_block = text[diagnostics_step:upload_step]
+
+    assert diagnostics_step < upload_step
+    assert "ASCEND_BENCHMARK_STEP_RESULTS_JSON" in diagnostics_block
+    assert '"id":"formal-benchmark"' in diagnostics_block
+    assert "steps.formal-benchmark.outputs.exit_code" in diagnostics_block
+    assert "build_ascend_benchmark_diagnostics.py" in diagnostics_block
+    assert "nightly-diagnostics.json" in diagnostics_block
+    for state in (
+        "benchmark_execution_status",
+        "publication_status",
+        "data_quality_status",
+        "release_visibility_status",
+    ):
+        assert state in diagnostics_block
+    assert "BENCHMARK_REPO_GH_TOKEN" not in diagnostics_block
+    assert "BENCHMARK_REPO_SSH_KEY" not in diagnostics_block
+
+
+def test_plugin_checkout_and_installed_preflights_run_before_benchmark():
+    text = workflow_text()
+    checkout = text.index("      - name: Checkout vllm-ascend-hust repo")
+    checkout_preflight = text.index("      - name: Preflight vllm-ascend-hust checkout")
+    install = text.index("      - name: Prepare Ascend runtime and install repos")
+    installed_preflight = text.index("      - name: Verify installation")
+    benchmark = text.index("      - name: Run benchmark CI and optional formal publish")
+
+    assert checkout < checkout_preflight < install < installed_preflight < benchmark
+    assert "verify_ascend_benchmark_plugin.py checkout" in text
+    assert '--expected-sha "$VLLM_ASCEND_HUST_REPO_REF"' in text
+    assert "verify_ascend_benchmark_plugin.py installed" in text
+    assert "plugin-checkout.json" in text
+    assert "plugin-installed.json" in text
+
+
 def test_benchmark_script_does_not_force_max_model_len():
     script = (
         Path(__file__).resolve().parents[2]
