@@ -108,7 +108,7 @@ def verify_installed(core_repo: Path, plugin_repo: Path) -> dict[str, Any]:
             f"found {len(entry_points)}"
         )
     entry_point = entry_points[0]
-    if not entry_point.value.startswith("vllm_ascend:"):
+    if entry_point.value != "vllm_ascend:register":
         raise RuntimeError(
             f"unexpected Ascend platform entry point: {entry_point.value}"
         )

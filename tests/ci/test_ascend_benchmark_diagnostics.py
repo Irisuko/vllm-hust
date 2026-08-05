@@ -288,6 +288,62 @@ def test_scenario_symlink_and_checksum_symlink_are_rejected(tmp_path: Path):
     )
 
 
+def test_scenario_summary_symlink_is_rejected_without_reading_target(tmp_path: Path):
+    result_root = tmp_path / "results"
+    result_root.mkdir()
+    external_summary = tmp_path / "external.tsv"
+    external_summary.write_text(
+        "scenario\trun_id\tresult_root\traw_result\tsubmission_dir\texit_code\n"
+        "secret-value\tnightly\t.\t.\t.\t0\n",
+        encoding="utf-8",
+    )
+    summary = result_root / "multi_scenario_results.tsv"
+    summary.symlink_to(external_summary)
+
+    payload = _build(
+        result_root,
+        summary,
+        [{"id": "formal-benchmark", "outcome": "success", "exit_code": "0"}],
+    )
+
+    assert payload["benchmark_execution_status"] == "failed"
+    assert payload["scenario_summary"]["scenarios"][0]["result_root"] == "rejected"
+    assert "secret-value" not in json.dumps(payload)
+
+
+def test_plugin_preflight_symlink_is_rejected_without_reading_target(tmp_path: Path):
+    result_root = tmp_path / "results"
+    preflight_root = result_root / "preflight"
+    preflight_root.mkdir(parents=True)
+    external_result = tmp_path / "plugin-installed.json"
+    external_result.write_text(
+        json.dumps(
+            {
+                "mode": "installed",
+                "status": "failed",
+                "reason": "secret-value",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (preflight_root / "plugin-installed.json").symlink_to(external_result)
+
+    payload = _build(
+        result_root,
+        result_root / "missing.tsv",
+        [{"id": "formal-benchmark", "outcome": "failure", "exit_code": "1"}],
+    )
+
+    assert payload["plugin_preflight"] == [
+        {
+            "mode": "installed",
+            "status": "failed",
+            "reason": "preflight result path is unsafe",
+        }
+    ]
+    assert "secret-value" not in json.dumps(payload)
+
+
 def test_step_results_drop_unapproved_output_fields():
     secret = "not-for-artifacts"
     results = diagnostics.load_step_results(

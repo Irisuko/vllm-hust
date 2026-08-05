@@ -119,6 +119,24 @@ def load_scenarios(
 ) -> list[dict[str, Any]]:
     scenarios = []
     if summary_path.is_file():
+        if summary_path.is_symlink() or not _path_is_contained(
+            summary_path, result_root
+        ):
+            return [
+                {
+                    "scenario": bench_scenario,
+                    "run_id": run_id,
+                    "status": "failed",
+                    "exit_code": formal_exit_code,
+                    "result_root": "rejected",
+                    "raw_result": "rejected",
+                    "submission_dir": "rejected",
+                    "path_errors": [
+                        "scenario summary escapes the benchmark result root"
+                    ],
+                    "_submission_path": None,
+                }
+            ]
         with summary_path.open(encoding="utf-8", newline="") as summary_file:
             for row in csv.DictReader(summary_file, delimiter="\t"):
                 scenario_root = _candidate_path(row["result_root"], result_root)
@@ -273,6 +291,15 @@ def verify_submission_evidence(submission_dir: Path) -> dict[str, Any]:
 def load_plugin_preflights(result_root: Path) -> list[dict[str, str]]:
     results = []
     for path in sorted((result_root / "preflight").glob("plugin-*.json")):
+        if path.is_symlink() or not _path_is_contained(path, result_root):
+            results.append(
+                {
+                    "mode": path.stem.removeprefix("plugin-"),
+                    "status": "failed",
+                    "reason": "preflight result path is unsafe",
+                }
+            )
+            continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

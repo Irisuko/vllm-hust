@@ -168,3 +168,59 @@ def test_installed_preflight_loads_workspace_modules_and_entry_point(
     assert payload["status"] == "passed"
     assert payload["platform_entry_point"] == "vllm_ascend:register"
     assert payload["xxhash_version"] == "3.5.0"
+
+
+def test_installed_preflight_rejects_wrong_callable_entry_point(tmp_path: Path):
+    core_repo = tmp_path / "core"
+    plugin_repo = tmp_path / "plugin"
+    site_packages = tmp_path / "site-packages"
+    (core_repo / "vllm").mkdir(parents=True)
+    (plugin_repo / "vllm_ascend").mkdir(parents=True)
+    dist_info = site_packages / "vllm_ascend_hust-1.0.dist-info"
+    xxhash_dist_info = site_packages / "xxhash-3.5.0.dist-info"
+    dist_info.mkdir(parents=True)
+    xxhash_dist_info.mkdir(parents=True)
+    (core_repo / "vllm/__init__.py").write_text("", encoding="utf-8")
+    (plugin_repo / "vllm_ascend/__init__.py").write_text(
+        "def wrong_register():\n    return 'ascend'\n", encoding="utf-8"
+    )
+    (site_packages / "xxhash.py").write_text("", encoding="utf-8")
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: vllm-ascend-hust\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
+    (dist_info / "entry_points.txt").write_text(
+        "[vllm.platform_plugins]\nascend = vllm_ascend:wrong_register\n",
+        encoding="utf-8",
+    )
+    (xxhash_dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: xxhash\nVersion: 3.5.0\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "installed.json"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        (str(core_repo), str(plugin_repo), str(site_packages))
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "installed",
+            "--core-repo",
+            str(core_repo),
+            "--plugin-repo",
+            str(plugin_repo),
+            "--output",
+            str(output),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert "unexpected Ascend platform entry point" in payload["reason"]
