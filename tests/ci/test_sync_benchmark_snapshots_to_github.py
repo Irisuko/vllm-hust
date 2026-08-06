@@ -106,6 +106,7 @@ def write_submission_evidence(submission: Path) -> None:
         "leaderboard_manifest.json": "{}\n",
         "run_leaderboard.json": "{}\n",
         "env-manifest.json": '{"git_info": {}}\n',
+        "pip-packages.json": "[]\n",
     }
     for name, content in files.items():
         (submission / name).write_text(content, encoding="utf-8")
@@ -276,6 +277,9 @@ def test_sync_benchmark_snapshots_verifies_published_commit(tmp_path):
     assert (benchmark_repo / "submissions" / "ci-test" / "STATUS").read_text(
         encoding="utf-8"
     ) == "OK\n"
+    assert (benchmark_repo / "submissions" / "ci-test" / "pip-packages.json").read_text(
+        encoding="utf-8"
+    ) == "[]\n"
 
 
 @pytest.mark.parametrize(

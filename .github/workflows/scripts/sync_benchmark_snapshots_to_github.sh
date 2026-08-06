@@ -25,6 +25,7 @@ required_submission_files=(
   leaderboard_manifest.json
   run_leaderboard.json
   env-manifest.json
+  pip-packages.json
   checksums.sha256
   STATUS
 )
