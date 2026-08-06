@@ -3,6 +3,7 @@
 
 import json
 from dataclasses import fields
+from pathlib import Path
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -72,7 +73,7 @@ def test_json_round_trip() -> None:
     assert restored.provider_config["merge"] is None
 
 
-def test_cli_and_python_use_same_config_type() -> None:
+def test_cli_and_python_use_same_config_type(tmp_path: Path) -> None:
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     payload = {
         "schema_version": 1,
@@ -80,17 +81,24 @@ def test_cli_and_python_use_same_config_type() -> None:
         "provider_config": _config().provider_config,
     }
 
-    args = parser.parse_args(["--kv-cache-compression-config", json.dumps(payload)])
+    args = parser.parse_args(
+        [
+            "--model",
+            str(tmp_path),
+            "--kv-cache-compression-config",
+            json.dumps(payload),
+        ]
+    )
     engine_args = EngineArgs.from_cli_args(args)
 
     assert args.kv_cache_compression_config == _config()
     assert engine_args.kv_cache_compression_config == _config()
 
 
-def test_cli_is_disabled_by_default() -> None:
+def test_cli_is_disabled_by_default(tmp_path: Path) -> None:
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
 
-    args = parser.parse_args([])
+    args = parser.parse_args(["--model", str(tmp_path)])
 
     assert args.kv_cache_compression_config is None
     assert EngineArgs.from_cli_args(args).kv_cache_compression_config is None
