@@ -45,8 +45,6 @@ write_github_env() {
   fi
 }
 
-write_github_env GITHUB_SNAPSHOT_SYNC_STATUS attempting
-
 validate_fetch_retry_configuration() {
   case "$SNAPSHOT_MAX_FETCH_ATTEMPTS" in
     ''|*[!0-9]*|0*)
@@ -82,6 +80,7 @@ fetch_target_branch_with_retry() {
 }
 
 validate_fetch_retry_configuration
+write_github_env GITHUB_SNAPSHOT_SYNC_STATUS attempting
 
 if [[ -n "$SNAPSHOT_EXPECTED_BASE_SHA" \
   && ! "$SNAPSHOT_EXPECTED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
