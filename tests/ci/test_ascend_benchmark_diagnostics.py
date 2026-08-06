@@ -25,6 +25,7 @@ def _write_submission(root: Path, run_id: str, *, valid_checksums: bool = True) 
         "run_leaderboard.json": "{}\n",
         "leaderboard_manifest.json": "{}\n",
         "env-manifest.json": "{}\n",
+        "pip-packages.json": "[]\n",
     }
     for name, content in evidence.items():
         (submission / name).write_text(content, encoding="utf-8")
@@ -174,6 +175,81 @@ def test_successful_execution_fails_data_quality_for_tampered_evidence(tmp_path:
     assert payload["data_quality_status"] == "failed"
     assert payload["data_quality"][0]["checksum_errors"] == [
         "checksum mismatch: env-manifest.json"
+    ]
+
+
+def test_successful_execution_fails_data_quality_for_missing_pip_packages(
+    tmp_path: Path,
+):
+    result_root = tmp_path / "results"
+    result_root.mkdir()
+    (result_root / "raw_benchmark.json").write_text("{}\n", encoding="utf-8")
+    submission = _write_submission(result_root, "nightly")
+    (submission / "pip-packages.json").unlink()
+
+    payload = _build(
+        result_root,
+        result_root / "missing.tsv",
+        [{"id": "formal-benchmark", "outcome": "success", "exit_code": "0"}],
+    )
+
+    assert payload["data_quality_status"] == "failed"
+    assert payload["data_quality"][0]["missing_files"] == ["pip-packages.json"]
+    assert (
+        "unsafe or missing checksum target: pip-packages.json"
+        in payload["data_quality"][0]["checksum_errors"]
+    )
+
+
+def test_successful_execution_fails_data_quality_for_missing_pip_checksum_entry(
+    tmp_path: Path,
+):
+    result_root = tmp_path / "results"
+    result_root.mkdir()
+    (result_root / "raw_benchmark.json").write_text("{}\n", encoding="utf-8")
+    submission = _write_submission(result_root, "nightly")
+    checksums_path = submission / "checksums.sha256"
+    checksum_lines = checksums_path.read_text(encoding="utf-8").splitlines()
+    checksums_path.write_text(
+        "\n".join(line for line in checksum_lines if "pip-packages.json" not in line)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = _build(
+        result_root,
+        result_root / "missing.tsv",
+        [{"id": "formal-benchmark", "outcome": "success", "exit_code": "0"}],
+    )
+
+    assert payload["data_quality_status"] == "failed"
+    assert payload["data_quality"][0]["missing_files"] == []
+    assert payload["data_quality"][0]["checksum_errors"] == [
+        "checksum entry missing: pip-packages.json"
+    ]
+
+
+def test_successful_execution_fails_data_quality_for_tampered_pip_packages(
+    tmp_path: Path,
+):
+    result_root = tmp_path / "results"
+    result_root.mkdir()
+    (result_root / "raw_benchmark.json").write_text("{}\n", encoding="utf-8")
+    submission = _write_submission(result_root, "nightly")
+    (submission / "pip-packages.json").write_text(
+        '[{"name": "tampered"}]\n', encoding="utf-8"
+    )
+
+    payload = _build(
+        result_root,
+        result_root / "missing.tsv",
+        [{"id": "formal-benchmark", "outcome": "success", "exit_code": "0"}],
+    )
+
+    assert payload["data_quality_status"] == "failed"
+    assert payload["data_quality"][0]["missing_files"] == []
+    assert payload["data_quality"][0]["checksum_errors"] == [
+        "checksum mismatch: pip-packages.json"
     ]
 
 

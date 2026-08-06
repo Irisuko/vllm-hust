@@ -18,6 +18,7 @@ REQUIRED_EVIDENCE = (
     "run_leaderboard.json",
     "leaderboard_manifest.json",
     "env-manifest.json",
+    "pip-packages.json",
     "checksums.sha256",
 )
 HEX_DIGITS = frozenset("0123456789abcdef")
