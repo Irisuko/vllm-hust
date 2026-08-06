@@ -55,6 +55,15 @@ if [[ "$*" == *"validate_public_leaderboard_snapshots.py"* ]]; then
   exit "${FAKE_PUBLIC_VALIDATOR_EXIT:-0}"
 fi
 if [[ "$*" == *"validate-trend"* ]]; then
+  while [[ "$#" -gt 0 ]]; do
+    if [[ "$1" == "--input" ]]; then
+      if [[ -n "${FAKE_TREND_VALIDATOR_INPUTS_FILE:-}" ]]; then
+        printf '%s\n' "$2" >> "$FAKE_TREND_VALIDATOR_INPUTS_FILE"
+      fi
+      break
+    fi
+    shift
+  done
   exit "${FAKE_TREND_VALIDATOR_EXIT:-0}"
 fi
 if [[ "$1" != "-m" \
@@ -223,6 +232,7 @@ def test_sync_benchmark_snapshots_verifies_published_commit(tmp_path):
     vllm_hust_repo = tmp_path / "vllm-hust"
     submission = tmp_path / "submission"
     github_env = tmp_path / "github-env"
+    trend_validator_inputs = tmp_path / "trend-validator-inputs"
     fake_python = write_fake_python(tmp_path)
 
     run(["git", "clone", str(remote), str(benchmark_repo)], tmp_path)
@@ -247,6 +257,7 @@ def test_sync_benchmark_snapshots_verifies_published_commit(tmp_path):
             "BENCHMARK_REPO_REMOTE": "origin",
             "BENCHMARK_REPO_SLUG": "local/benchmark",
             "CURRENT_SUBMISSION_DIR": str(submission),
+            "FAKE_TREND_VALIDATOR_INPUTS_FILE": str(trend_validator_inputs),
             "GITHUB_ENV": str(github_env),
             "LOCAL_SNAPSHOT_OUTPUT_DIR": str(tmp_path / "local-snapshots"),
             "PYTHON_BIN": str(fake_python),
@@ -280,6 +291,17 @@ def test_sync_benchmark_snapshots_verifies_published_commit(tmp_path):
     assert (benchmark_repo / "submissions" / "ci-test" / "pip-packages.json").read_text(
         encoding="utf-8"
     ) == "[]\n"
+    trend_inputs = [
+        Path(value)
+        for value in trend_validator_inputs.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [path.name for path in trend_inputs] == [
+        "leaderboard_single.json",
+        "leaderboard_multi.json",
+    ]
+    assert trend_inputs[0].parent == trend_inputs[1].parent
+    assert trend_inputs[0].parent.name == "snapshots"
+    assert trend_inputs[0].parent.parent.name.startswith(".snapshot-publication.")
 
 
 @pytest.mark.parametrize(

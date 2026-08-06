@@ -64,12 +64,17 @@ def test_benchmark_snapshot_sync_explains_missing_write_credentials():
     assert "Benchmark repo publish target:" in text
     staging_index = text.index("publication_staging_dir=$(mktemp -d")
     public_validator_index = text.index("validate_public_leaderboard_snapshots.py")
-    trend_validator_index = text.index("validate-trend --input")
+    trend_validator_index = text.index(
+        "for file_name in leaderboard_single.json leaderboard_multi.json"
+    )
     git_add_index = text.index('git -C "$BENCHMARK_REPO_DIR" add')
     git_commit_index = text.index('git -C "$BENCHMARK_REPO_DIR" commit')
     git_push_index = text.index('git -C "$BENCHMARK_REPO_DIR" push')
     assert staging_index < public_validator_index < trend_validator_index
     assert trend_validator_index < git_add_index
+    trend_validator_block = text[trend_validator_index:git_add_index]
+    assert "leaderboard_single.json leaderboard_multi.json" in trend_validator_block
+    assert '--input "$staged_snapshot_dir/$file_name"' in trend_validator_block
     assert git_add_index < git_commit_index < git_push_index
     assert "write_github_env GITHUB_SNAPSHOT_SYNC_STATUS rejected" in text
     assert (
