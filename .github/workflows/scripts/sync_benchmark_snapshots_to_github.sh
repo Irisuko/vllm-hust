@@ -195,14 +195,19 @@ prepare_publication_commit() {
     echo "publication admission failed at public snapshot validation" >&2
     return 2
   fi
-  for file_name in leaderboard_single.json leaderboard_multi.json; do
-    if ! PYTHONPATH="$BENCHMARK_REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
-      "$PYTHON_BIN" -m vllm_hust_benchmark.cli validate-trend \
-      --input "$staged_snapshot_dir/$file_name"; then
-      echo "publication admission failed at trend validation: $file_name" >&2
-      return 2
-    fi
-  done
+  if ! PYTHONPATH="$BENCHMARK_REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON_BIN" - "$staged_snapshot_dir" <<'PY'
+import sys
+from pathlib import Path
+
+from vllm_hust_benchmark.integration import validate_public_snapshot_trend_admission
+
+validate_public_snapshot_trend_admission(Path(sys.argv[1]))
+PY
+  then
+    echo "publication admission failed at trend validation" >&2
+    return 2
+  fi
 
   mkdir -p "$target_submission_dir" "$SNAPSHOT_OUTPUT_DIR" || return $?
   for file_name in "${required_submission_files[@]}"; do

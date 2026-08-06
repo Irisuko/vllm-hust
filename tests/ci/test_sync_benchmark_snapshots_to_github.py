@@ -54,16 +54,11 @@ set -euo pipefail
 if [[ "$*" == *"validate_public_leaderboard_snapshots.py"* ]]; then
   exit "${FAKE_PUBLIC_VALIDATOR_EXIT:-0}"
 fi
-if [[ "$*" == *"validate-trend"* ]]; then
-  while [[ "$#" -gt 0 ]]; do
-    if [[ "$1" == "--input" ]]; then
-      if [[ -n "${FAKE_TREND_VALIDATOR_INPUTS_FILE:-}" ]]; then
-        printf '%s\n' "$2" >> "$FAKE_TREND_VALIDATOR_INPUTS_FILE"
-      fi
-      break
-    fi
-    shift
-  done
+if [[ "$1" == "-" && "$#" == "2" ]]; then
+  if [[ -n "${FAKE_TREND_VALIDATOR_INPUTS_FILE:-}" ]]; then
+    printf '%s\n' "$2" >> "$FAKE_TREND_VALIDATOR_INPUTS_FILE"
+  fi
+  cat >/dev/null
   exit "${FAKE_TREND_VALIDATOR_EXIT:-0}"
 fi
 if [[ "$1" != "-m" \
@@ -291,17 +286,11 @@ def test_sync_benchmark_snapshots_verifies_published_commit(tmp_path):
     assert (benchmark_repo / "submissions" / "ci-test" / "pip-packages.json").read_text(
         encoding="utf-8"
     ) == "[]\n"
-    trend_inputs = [
-        Path(value)
-        for value in trend_validator_inputs.read_text(encoding="utf-8").splitlines()
-    ]
-    assert [path.name for path in trend_inputs] == [
-        "leaderboard_single.json",
-        "leaderboard_multi.json",
-    ]
-    assert trend_inputs[0].parent == trend_inputs[1].parent
-    assert trend_inputs[0].parent.name == "snapshots"
-    assert trend_inputs[0].parent.parent.name.startswith(".snapshot-publication.")
+    trend_inputs = trend_validator_inputs.read_text(encoding="utf-8").splitlines()
+    assert len(trend_inputs) == 1
+    trend_input = Path(trend_inputs[0])
+    assert trend_input.name == "snapshots"
+    assert trend_input.parent.name.startswith(".snapshot-publication.")
 
 
 @pytest.mark.parametrize(
