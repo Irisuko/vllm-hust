@@ -265,16 +265,22 @@ for attempt in $(seq 1 "$SNAPSHOT_MAX_PUSH_ATTEMPTS"); do
   if prepare_publication_commit; then
     snapshot_commit=$(git -C "$BENCHMARK_REPO_DIR" rev-parse HEAD)
     if git -C "$BENCHMARK_REPO_DIR" push "$BENCHMARK_REPO_REMOTE" "HEAD:$SNAPSHOT_TARGET_BRANCH"; then
-      verify_published_benchmark_repo_state "$snapshot_commit"
-      echo "Pushed benchmark publication to ${BENCHMARK_REPO_SLUG}@${SNAPSHOT_TARGET_BRANCH}: $snapshot_commit"
-      echo "Submission path: $relative_submission_dir"
-      echo "Snapshot path: $relative_snapshot_dir"
       write_github_env GITHUB_SNAPSHOT_SYNC_STATUS pushed
       write_github_env GITHUB_SNAPSHOT_SYNC_COMMIT "$snapshot_commit"
       write_github_env GITHUB_SNAPSHOT_SYNC_REPO "$BENCHMARK_REPO_SLUG"
       write_github_env GITHUB_SNAPSHOT_SYNC_BRANCH "$SNAPSHOT_TARGET_BRANCH"
       write_github_env GITHUB_SNAPSHOT_SYNC_SUBMISSION_PATH "$relative_submission_dir"
       write_github_env GITHUB_SNAPSHOT_SYNC_SNAPSHOT_PATH "$relative_snapshot_dir"
+      if verify_published_benchmark_repo_state "$snapshot_commit"; then
+        echo "Pushed benchmark publication to ${BENCHMARK_REPO_SLUG}@${SNAPSHOT_TARGET_BRANCH}: $snapshot_commit"
+        echo "Submission path: $relative_submission_dir"
+        echo "Snapshot path: $relative_snapshot_dir"
+      else
+        verification_status=$?
+        write_github_env GITHUB_SNAPSHOT_SYNC_VERIFICATION failed
+        echo "benchmark publication push succeeded, but verification failed for $snapshot_commit" >&2
+        exit "$verification_status"
+      fi
       exit 0
     fi
 

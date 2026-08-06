@@ -522,6 +522,55 @@ def test_verify_fetch_retry_recovers_after_push(tmp_path):
     )
 
 
+def test_verify_fetch_retry_exhaustion_records_pushed_unverified_state(tmp_path):
+    env, remote, _benchmark_repo, github_env = prepare_sync_environment(
+        tmp_path, "verify-fetch-exhausted"
+    )
+    fake_git = write_flaky_fetch_git(tmp_path)
+    fetch_count = tmp_path / "fetch-count"
+    env.update(
+        {
+            "FAKE_GIT_FETCH_COUNT": str(fetch_count),
+            "FAKE_GIT_FETCH_FAIL_CALLS": "2,3,4",
+            "PATH": f"{fake_git.parent}:{env['PATH']}",
+            "REAL_GIT": shutil.which("git") or "git",
+            "SNAPSHOT_MAX_FETCH_ATTEMPTS": "3",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT_PATH)],
+        cwd=tmp_path,
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    env_text = github_env.read_text(encoding="utf-8")
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "verify fetch failed after 3 attempts" in result.stderr
+    assert "push succeeded, but verification failed" in result.stderr
+    assert fetch_count.read_text(encoding="utf-8").strip() == "4"
+    assert "GITHUB_SNAPSHOT_SYNC_STATUS=pushed" in env_text
+    assert "GITHUB_SNAPSHOT_SYNC_COMMIT=" in env_text
+    assert "GITHUB_SNAPSHOT_SYNC_VERIFICATION=failed" in env_text
+    assert "GITHUB_SNAPSHOT_SYNC_VERIFIED_COMMIT=" not in env_text
+    assert (
+        run(
+            [
+                "git",
+                "--git-dir",
+                str(remote),
+                "show",
+                "main:submissions/verify-fetch-exhausted/STATUS",
+            ],
+            tmp_path,
+        ).stdout.strip()
+        == "OK"
+    )
+
+
 @pytest.mark.parametrize(
     ("variable", "value", "expected_message"),
     [
