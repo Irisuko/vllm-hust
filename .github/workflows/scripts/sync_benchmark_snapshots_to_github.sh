@@ -196,7 +196,15 @@ prepare_publication_commit() {
     return 2
   fi
   if ! PYTHONPATH="$BENCHMARK_REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
-    "$PYTHON_BIN" -m vllm_hust_benchmark.cli validate-trend --input "$staged_snapshot_dir"; then
+    "$PYTHON_BIN" - "$staged_snapshot_dir" <<'PY'
+import sys
+from pathlib import Path
+
+from vllm_hust_benchmark.integration import validate_public_snapshot_trend_admission
+
+validate_public_snapshot_trend_admission(Path(sys.argv[1]))
+PY
+  then
     echo "publication admission failed at trend validation" >&2
     return 2
   fi
