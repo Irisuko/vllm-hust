@@ -263,7 +263,6 @@ verify_published_benchmark_repo_state() {
   fetch_target_branch_with_retry verify || return $?
   verified_commit=$(git -C "$BENCHMARK_REPO_DIR" rev-parse "$BENCHMARK_REPO_REMOTE/$SNAPSHOT_TARGET_BRANCH") || return $?
   if [[ "$verified_commit" != "$expected_commit" ]]; then
-    write_github_env GITHUB_SNAPSHOT_SYNC_STATUS failed
     write_github_env GITHUB_SNAPSHOT_SYNC_VERIFICATION failed
     echo "benchmark publication verification failed: expected $expected_commit, got $verified_commit" >&2
     return 1
@@ -272,7 +271,6 @@ verify_published_benchmark_repo_state() {
   for file_name in "${required_submission_files[@]}"; do
     if ! git -C "$BENCHMARK_REPO_DIR" cat-file -e \
       "$verified_commit:$relative_submission_dir/$file_name"; then
-      write_github_env GITHUB_SNAPSHOT_SYNC_STATUS failed
       write_github_env GITHUB_SNAPSHOT_SYNC_VERIFICATION failed
       echo "benchmark publication verification failed: missing $relative_submission_dir/$file_name" >&2
       return 1
@@ -282,7 +280,6 @@ verify_published_benchmark_repo_state() {
   for file_name in "${required_snapshot_files[@]}"; do
     if ! git -C "$BENCHMARK_REPO_DIR" cat-file -e \
       "$verified_commit:$relative_snapshot_dir/$file_name"; then
-      write_github_env GITHUB_SNAPSHOT_SYNC_STATUS failed
       write_github_env GITHUB_SNAPSHOT_SYNC_VERIFICATION failed
       echo "benchmark publication verification failed: missing $relative_snapshot_dir/$file_name" >&2
       return 1
