@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -156,6 +158,98 @@ def test_partial_run_preserves_failed_step_and_scenario_exit_codes(tmp_path: Pat
         0,
         87,
     ]
+
+
+def test_scenario_summary_missing_columns_is_rejected(tmp_path: Path):
+    result_root = tmp_path / "results"
+    result_root.mkdir()
+    summary = result_root / "multi_scenario_results.tsv"
+    summary.write_text(
+        "scenario\trun_id\tresult_root\tsubmission_dir\texit_code\n"
+        "random-online\tnightly-random\t.\tsubmissions/nightly-random\t1\n",
+        encoding="utf-8",
+    )
+
+    payload = _build(
+        result_root,
+        summary,
+        [{"id": "formal-benchmark", "outcome": "failure", "exit_code": "1"}],
+    )
+
+    scenario = payload["scenario_summary"]["scenarios"][0]
+    assert payload["benchmark_execution_status"] == "failed"
+    assert scenario["scenario"] == "random-online"
+    assert scenario["raw_result"] == "rejected"
+    assert scenario["path_errors"] == [
+        "scenario summary is missing required columns: raw_result"
+    ]
+
+
+def test_invalid_scenario_row_is_rejected_without_losing_valid_rows(tmp_path: Path):
+    result_root = tmp_path / "results"
+    result_root.mkdir()
+    valid_row = _write_scenario(result_root, "random-online", 0, complete=True)
+    invalid_row = (
+        "sharegpt-online",
+        "nightly-sharegpt-online",
+        "",
+        "",
+        "",
+        "0",
+    )
+    summary = _write_scenario_summary(result_root, [valid_row, invalid_row])
+
+    payload = _build(
+        result_root,
+        summary,
+        [{"id": "formal-benchmark", "outcome": "failure", "exit_code": "87"}],
+    )
+
+    assert payload["benchmark_execution_status"] == "partial"
+    assert payload["scenario_summary"]["passed"] == 1
+    assert payload["scenario_summary"]["failed"] == 1
+    rejected = payload["scenario_summary"]["scenarios"][1]
+    assert rejected["scenario"] == "sharegpt-online"
+    assert rejected["exit_code"] == 0
+    assert rejected["result_root"] == "rejected"
+    assert rejected["path_errors"] == [
+        "scenario summary has invalid required fields: "
+        "result_root, raw_result, submission_dir"
+    ]
+
+
+def test_unreadable_scenario_summary_is_rejected(tmp_path: Path):
+    result_root = tmp_path / "results"
+    result_root.mkdir()
+    summary = result_root / "multi_scenario_results.tsv"
+    summary.write_bytes(b"scenario\trun_id\n\xff")
+    output = result_root / "nightly-diagnostics.json"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--result-root",
+            str(result_root),
+            "--output",
+            str(output),
+            "--scenario-summary",
+            str(summary),
+            "--step-results-json",
+            '[{"id":"formal-benchmark","outcome":"failure","exit_code":"1"}]',
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    scenario = payload["scenario_summary"]["scenarios"][0]
+    assert payload["benchmark_execution_status"] == "failed"
+    assert scenario["status"] == "failed"
+    assert scenario["result_root"] == "rejected"
+    assert scenario["path_errors"] == ["scenario summary is unreadable or malformed"]
 
 
 def test_successful_execution_fails_data_quality_for_tampered_evidence(tmp_path: Path):
