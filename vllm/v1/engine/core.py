@@ -174,7 +174,7 @@ class EngineCore:
             kv_cache_config, vllm_config
         )
 
-        self.scheduler: SchedulerInterface = Scheduler(
+        scheduler_kwargs: dict[str, Any] = dict(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             structured_output_manager=self.structured_output_manager,
@@ -182,8 +182,12 @@ class EngineCore:
             log_stats=self.log_stats,
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
-            kv_cache_compression_runtime_spec=(self.kv_cache_compression_runtime_spec),
         )
+        if self.kv_cache_compression_runtime_spec is not None:
+            scheduler_kwargs["kv_cache_compression_runtime_spec"] = (
+                self.kv_cache_compression_runtime_spec
+            )
+        self.scheduler: SchedulerInterface = Scheduler(**scheduler_kwargs)
         self.scheduler.available_kv_cache_memory_bytes = (
             self.available_gpu_memory_for_kv_cache
             if self.available_gpu_memory_for_kv_cache >= 0

@@ -199,6 +199,64 @@ def test_async_scheduler_accepts_runtime_spec_via_kwargs() -> None:
     )
 
 
+def test_disabled_engine_preserves_legacy_scheduler_constructor(monkeypatch) -> None:
+    class SchedulerConstructed(Exception):
+        pass
+
+    class LegacyScheduler:
+        def __init__(
+            self,
+            vllm_config,
+            kv_cache_config,
+            structured_output_manager,
+            block_size,
+            hash_block_size=None,
+            include_finished_set=False,
+            log_stats=False,
+        ) -> None:
+            raise SchedulerConstructed
+
+    class FakeExecutor:
+        def __init__(self, vllm_config) -> None:
+            pass
+
+    def initialize_kv_caches(engine, vllm_config):
+        engine.kv_cache_compression_runtime_spec = None
+        return SimpleNamespace(kv_cache_groups=[object()])
+
+    monkeypatch.setattr("vllm.plugins.load_general_plugins", lambda: None)
+    monkeypatch.setattr(
+        engine_core_module.EngineCore,
+        "_initialize_kv_caches",
+        initialize_kv_caches,
+    )
+    monkeypatch.setattr(
+        engine_core_module,
+        "StructuredOutputManager",
+        lambda vllm_config: object(),
+    )
+    monkeypatch.setattr(
+        engine_core_module,
+        "resolve_kv_cache_block_sizes",
+        lambda kv_cache_config, vllm_config: (128, 128),
+    )
+    monkeypatch.setattr(
+        engine_core_module.envs,
+        "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH",
+        False,
+    )
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_rank_local=True),
+        scheduler_config=SimpleNamespace(
+            get_scheduler_cls=lambda: LegacyScheduler,
+            enable_chunked_prefill=False,
+        ),
+    )
+
+    with pytest.raises(SchedulerConstructed):
+        EngineCore(config, FakeExecutor, log_stats=False)
+
+
 def test_all_worker_incompatibilities_are_reported() -> None:
     reports = [
         _report(
