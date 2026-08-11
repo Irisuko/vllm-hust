@@ -569,9 +569,13 @@ class KVCacheManager:
         max_cache_hit_length = request.num_tokens - 1
         runtime_spec = self.kv_cache_compression_runtime_spec
         if runtime_spec is not None and self.request_requires_compression(request):
-            max_cache_hit_length = min(
-                max_cache_hit_length,
-                request.num_prompt_tokens - runtime_spec.required_recompute_tokens,
+            # The provider needs this query suffix to run in the final prefill.
+            max_cache_hit_length = max(
+                0,
+                min(
+                    max_cache_hit_length,
+                    request.num_prompt_tokens - runtime_spec.required_recompute_tokens,
+                ),
             )
         computed_blocks, num_new_computed_tokens = (
             self.coordinator.find_longest_cache_hit(

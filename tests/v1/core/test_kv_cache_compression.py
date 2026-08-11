@@ -326,6 +326,8 @@ def _manager(
     num_blocks: int = 8,
     enable_caching: bool = False,
     compression_config: KVCacheCompressionConfig | None = None,
+    compression_threshold_tokens: int = 256,
+    required_recompute_tokens: int = 8,
 ) -> KVCacheManager:
     spec = FullAttentionSpec(
         block_size=block_size,
@@ -346,7 +348,13 @@ def _manager(
         enable_caching=enable_caching,
         kv_cache_compression_config=compression_config,
         kv_cache_compression_runtime_spec=(
-            _runtime_spec() if compression_config is not None else None
+            replace(
+                _runtime_spec(),
+                compression_threshold_tokens=compression_threshold_tokens,
+                required_recompute_tokens=required_recompute_tokens,
+            )
+            if compression_config is not None
+            else None
         ),
     )
 
@@ -529,8 +537,19 @@ def test_prefix_cache_commit_swaps_to_private_unhashed_destination() -> None:
     manager.free(request)
 
 
-def test_prefix_hit_cap_preserves_full_query_window() -> None:
-    manager = _manager(enable_caching=True, compression_config=_config())
+@pytest.mark.parametrize(
+    ("required_recompute_tokens", "expected_cached_tokens"),
+    [(1, 768), (8, 640), (130, 512)],
+)
+def test_required_recompute_tokens_caps_prefix_cache_admission(
+    required_recompute_tokens: int,
+    expected_cached_tokens: int,
+) -> None:
+    manager = _manager(
+        enable_caching=True,
+        compression_config=_config(),
+        required_recompute_tokens=required_recompute_tokens,
+    )
     warm = _running_request("warm", prompt_len=769)
     blocks = manager.allocate_slots(
         warm,
@@ -543,8 +562,24 @@ def test_prefix_hit_cap_preserves_full_query_window() -> None:
     cached = _running_request("cached", prompt_len=769)
     computed, num_tokens = manager.get_computed_blocks(cached)
 
-    assert num_tokens == 640
-    assert len(computed.get_block_ids()[0]) == 5
+    assert num_tokens == expected_cached_tokens
+    assert cached.num_prompt_tokens - num_tokens >= required_recompute_tokens
+    assert len(computed.get_block_ids()[0]) == expected_cached_tokens // 128
+
+
+def test_recompute_window_clamps_short_prompt_cache_admission() -> None:
+    manager = _manager(
+        enable_caching=True,
+        compression_config=_config(),
+        compression_threshold_tokens=2,
+        required_recompute_tokens=8,
+    )
+    request = _running_request(prompt_len=4)
+
+    computed, num_tokens = manager.get_computed_blocks(request)
+
+    assert num_tokens == 0
+    assert computed.get_block_ids() == ([],)
 
 
 def test_prefix_plan_requires_live_private_destination() -> None:

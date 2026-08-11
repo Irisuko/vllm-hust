@@ -17,7 +17,13 @@ class KVCacheCompressionError(RuntimeError):
 
 @dataclass(frozen=True)
 class KVCacheCompressionRuntimeSpec:
-    """Provider-derived scheduling limits shared by every worker."""
+    """Provider-derived scheduling limits shared by every worker.
+
+    ``required_recompute_tokens`` is the requested query suffix for the final
+    prefill step. Core caps prefix-cache admission so that suffix, or the full
+    prompt when shorter, runs before compression. It is not a lower bound on
+    the compressed KV length.
+    """
 
     schema_version: int
     provider: str
