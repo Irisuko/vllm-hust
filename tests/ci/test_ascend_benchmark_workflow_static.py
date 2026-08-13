@@ -175,7 +175,18 @@ def test_benchmark_install_removes_conflicting_vllm_provider():
         ) : text.index("      - name: Verify installation")
     ]
 
-    assert '"${PYTHON_BIN}" -m pip uninstall -y vllm vllm-hust' in install_step
+    uninstall_start = install_step.index('"${PYTHON_BIN}" -m pip uninstall -y')
+    plugin_install = install_step.index("install_local_ascend_plugin.sh")
+    uninstall_block = install_step[uninstall_start:plugin_install]
+    uninstall_args = uninstall_block.replace("\\\n", " ").split()
+
+    for distribution in (
+        "vllm",
+        "vllm-hust",
+        "vllm-ascend",
+        "vllm-ascend-hust",
+    ):
+        assert distribution in uninstall_args
     assert (
         '"${PYTHON_BIN}" scripts/ensure_vllm_provider.py --remove-conflicts'
         in install_step
