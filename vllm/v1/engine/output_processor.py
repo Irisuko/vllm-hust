@@ -10,7 +10,6 @@ from typing import Any, cast
 import numpy as np
 import torch
 
-from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -41,7 +40,6 @@ from vllm.v1.metrics.stats import (
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
-logger = init_logger(__name__)
 
 
 class RequestOutputCollector:
@@ -53,60 +51,16 @@ class RequestOutputCollector:
     producer gets ahead of the consumer.
     """
 
-    def __init__(
-        self,
-        output_kind: RequestOutputKind,
-        request_id: str,
-        max_pending_tokens: int | None = None,
-    ):
-        self._input_stream_task: asyncio.Task | None = None
-
-        if max_pending_tokens is not None:
-            if (
-                isinstance(max_pending_tokens, bool)
-                or not isinstance(max_pending_tokens, int)
-                or max_pending_tokens <= 0
-            ):
-                raise ValueError("max_pending_tokens must be a positive integer")
-            if output_kind != RequestOutputKind.DELTA:
-                raise ValueError("max_pending_tokens requires DELTA output")
-
+    def __init__(self, output_kind: RequestOutputKind, request_id: str):
         self.aggregate = output_kind == RequestOutputKind.DELTA
         self.request_id = request_id
-        self.max_pending_tokens = max_pending_tokens
-        self.pending_tokens = 0
-        self.backpressure_triggered = False
-        self.backpressure_observed_tokens: int | None = None
         self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
         self.ready = asyncio.Event()
 
-    def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> bool:
-        """Non-blocking put operation.
+        self._input_stream_task: asyncio.Task | None = None
 
-        Returns false when a request-scoped pending-token credit is exhausted.
-        """
-        if self.max_pending_tokens is None:
-            self._store(output)
-            return True
-
-        if self.backpressure_triggered and not isinstance(output, Exception):
-            return False
-
-        incoming_tokens = self._count_tokens(output)
-        observed_tokens = self.pending_tokens + incoming_tokens
-        if (
-            self.max_pending_tokens is not None
-            and observed_tokens > self.max_pending_tokens
-        ):
-            self.backpressure_triggered = True
-            self.backpressure_observed_tokens = observed_tokens
-            return False
-
-        self._store(output)
-        self.pending_tokens = observed_tokens
-        return True
-
-    def _store(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
+    def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
+        """Non-blocking put operation."""
         if self.output is None or isinstance(output, Exception):
             self.output = output
             self.ready.set()
@@ -121,28 +75,11 @@ class RequestOutputCollector:
         ):
             self.output = output
 
-    @staticmethod
-    def _count_tokens(
-        output: RequestOutput | PoolingRequestOutput | Exception,
-    ) -> int:
-        if not isinstance(output, RequestOutput):
-            return 0
-        return sum(len(completion.token_ids) for completion in output.outputs)
-
-    def replace_with_terminal(self, output: RequestOutput) -> None:
-        """Atomically replace unpublished backlog with one terminal output."""
-        if not output.finished:
-            raise ValueError("replacement output must be terminal")
-        self.output = output
-        self.pending_tokens = 0
-        self.ready.set()
-
     async def get(self) -> RequestOutput | PoolingRequestOutput:
         """Get operation blocks on put event."""
         while (output := self.output) is None:
             await self.ready.wait()
         self.output = None
-        self.pending_tokens = 0
         self.ready.clear()
         if isinstance(output, Exception):
             raise output
@@ -153,7 +90,6 @@ class RequestOutputCollector:
         output = self.output
         if output is not None:
             self.output = None
-            self.pending_tokens = 0
             self.ready.clear()
         if isinstance(output, Exception):
             raise output
@@ -511,12 +447,7 @@ class OutputProcessor:
             assert state.queue is not None
             state.queue.put(e)
 
-    def abort_requests(
-        self,
-        request_ids: Iterable[str],
-        internal: bool,
-        replace_pending: bool = False,
-    ) -> list[str]:
+    def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
         """Abort a list of requests.
 
         The request_ids may be either external request IDs (those passed to
@@ -568,11 +499,7 @@ class OutputProcessor:
                         kv_transfer_params=None,
                     )
                 ):
-                    if replace_pending:
-                        assert isinstance(request_output, RequestOutput)
-                        req_state.queue.replace_with_terminal(request_output)
-                    else:
-                        req_state.queue.put(request_output)
+                    req_state.queue.put(request_output)
             elif parent := self.parent_requests.get(request_id):
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
@@ -676,11 +603,8 @@ class OutputProcessor:
 
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
-        backpressured_req_ids: set[str] = set()
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
-            if req_id in backpressured_req_ids:
-                continue
             req_state = self.request_states.get(req_id)
             if req_state is None:
                 # Ignore output for already-aborted request.
@@ -736,16 +660,7 @@ class OutputProcessor:
 
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
-                    if not req_state.queue.put(request_output):
-                        logger.warning(
-                            "Request %s exhausted native stream backlog credit "
-                            "(%s pending tokens observed; limit %s)",
-                            req_id,
-                            req_state.queue.backpressure_observed_tokens,
-                            req_state.queue.max_pending_tokens,
-                        )
-                        backpressured_req_ids.add(req_id)
-                        continue
+                    req_state.queue.put(request_output)
                 else:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
@@ -771,15 +686,6 @@ class OutputProcessor:
                     )
                     if self.tracing_enabled:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
-
-        if backpressured_req_ids:
-            reqs_to_abort.extend(
-                self.abort_requests(
-                    backpressured_req_ids,
-                    internal=True,
-                    replace_pending=True,
-                )
-            )
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
